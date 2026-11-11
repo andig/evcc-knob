@@ -9,13 +9,18 @@ from pathlib import Path
 
 from PIL import ImageFont
 
-ASCII = "".join(chr(c) for c in range(0x21, 0x7F)) + "°"
-# name, weight, pixel size, characters
+TEXT = "".join(chr(c) for c in range(0x21, 0x7F)) + "°·"
+DIGITS = "0123456789.:-%"
+# name, weight, pixel size, characters; sizes are the design sizes halved
 FONTS = [
-    ("SMALL", "Medium", 14, ASCII),
-    ("MED", "SemiBold", 16, ASCII),
-    ("LARGE", "Bold", 30, ASCII),
-    ("HUGE", "Bold", 50, "0123456789.:-%"),
+    ("SMALL", "Medium", 11, TEXT),
+    ("MED", "SemiBold", 13, TEXT),
+    ("UNIT", "SemiBold", 15, TEXT),
+    ("LARGE", "Bold", 30, TEXT),
+    ("NUM36", "Bold", 36, DIGITS),
+    ("NUM48", "Bold", 48, DIGITS),
+    ("NUM52", "Bold", 52, DIGITS),
+    ("NUM60", "Bold", 60, DIGITS),
 ]
 
 

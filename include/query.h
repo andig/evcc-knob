@@ -7,6 +7,7 @@ def ep: if . == null or .[0:4] == "0001" then null
   else (sub("\\.[0-9]+"; "") | sub("Z$"; "+00:00") | strptime("%Y-%m-%dT%H:%M:%S%z") | mktime) end;
 def hm: if . == null then null else strflocaltime("%H:%M") end;
 .loadpoints[$i] as $l
+| (.vehicles[$l.vehicleName // ""] // {}) as $v
 | ($l.planProjectedStart | ep) as $ps
 | ($l.planProjectedEnd | ep) as $pe
 | {
@@ -14,9 +15,12 @@ def hm: if . == null then null else strflocaltime("%H:%M") end;
   lp: $l.title, mode: $l.mode, cp: $l.chargePower, soc: $l.vehicleSoc,
   cont: $l.chargerFeatureContinuous, sw: $l.chargerFeatureSwitchDevice,
   heat: $l.chargerFeatureHeating, dev: $l.chargerFeatureIntegratedDevice,
+  cap: $v.capacity, vt: [.vehicles | to_entries[] | [.key, .value.title]],
   ac: $l.alwaysCharge, lim: $l.effectiveLimitSoc, con: $l.connected, veh: $l.vehicleTitle,
   fin: (if ($l.chargeRemainingDuration // 0) > 0 then now + $l.chargeRemainingDuration | hm else null end),
-  pt: ($l.effectivePlanTime | ep | hm), psoc: $l.effectivePlanSoc,
+  pt: ($l.effectivePlanTime | ep | hm), psoc: $l.effectivePlanSoc, pen: $l.planEnergy,
+  sbp: ((($l.vehicleName // "") != "" and (($v.features // []) | index("Offline") | not)
+    or ($l.vehicleSoc // 0) > 0) and ($v.capacity // 0) > 0),
   ps: ($ps | hm), pe: ($pe | hm),
   pv: .pvPower, grid: .grid.power, home: .homePower,
   bat: .battery.power, bsoc: .battery.soc,

@@ -13,18 +13,21 @@
 #include "fonts.h"
 
 const uint32_t C_BG = 0x020318, C_TRACK = 0x1C2030, C_SEG = 0x2A2E40, C_GREY = 0x93949E,
-               C_DIM = 0x6F7080, C_GREEN = 0x0FDE41, C_DARKGREEN = 0x0B5C26, C_WHITE = 0xFFFFFF;
+               C_DIM = 0x6F7080, C_GREEN = 0x0FDE41, C_DARKGREEN = 0x0B5C26, C_PILL = 0x0B3D1C, C_BATTERY = 0x0BA631, C_EXPORT = 0xFFCC00, C_WHITE = 0xFFFFFF;
 
-lgfx::VLWfont fontSmall, fontMed, fontLarge, fontHuge;
-const lgfx::IFont *F_SMALL = &fontSmall, *F_MED = &fontMed, *F_LARGE = &fontLarge, *F_HUGE = &fontHuge;
+// sizes are the design's, halved; the NUM fonts only hold digits and .:-%
+lgfx::VLWfont vlw[8];
+const lgfx::IFont *F_SMALL = &vlw[0], *F_MED = &vlw[1], *F_UNIT = &vlw[2],
+                  *F_LARGE = &vlw[3], *F_NUM36 = &vlw[4], *F_NUM48 = &vlw[5],
+                  *F_NUM52 = &vlw[6], *F_NUM60 = &vlw[7];
 
 void loadFonts() {
-  static lgfx::PointerWrapper data[] = {{FONT_SMALL, sizeof(FONT_SMALL)},
-                                        {FONT_MED, sizeof(FONT_MED)},
-                                        {FONT_LARGE, sizeof(FONT_LARGE)},
-                                        {FONT_HUGE, sizeof(FONT_HUGE)}};
-  lgfx::VLWfont *all[] = {&fontSmall, &fontMed, &fontLarge, &fontHuge};
-  for (int i = 0; i < 4; i++) all[i]->loadFont(&data[i]);
+  static lgfx::PointerWrapper data[] = {
+      {FONT_SMALL, sizeof(FONT_SMALL)}, {FONT_MED, sizeof(FONT_MED)},
+      {FONT_UNIT, sizeof(FONT_UNIT)},   {FONT_LARGE, sizeof(FONT_LARGE)},
+      {FONT_NUM36, sizeof(FONT_NUM36)}, {FONT_NUM48, sizeof(FONT_NUM48)},
+      {FONT_NUM52, sizeof(FONT_NUM52)}, {FONT_NUM60, sizeof(FONT_NUM60)}};
+  for (int i = 0; i < 8; i++) vlw[i].loadFont(&data[i]);
 }
 
 struct Mode {
@@ -50,6 +53,10 @@ struct State {
   bool ok = false, connected = false;
   bool heating = false, integrated = false; // heating: soc and limit are temperatures
   bool continuous = false, switchDevice = false; // change the mode names and list, as in evcc
+  bool socPlan = false; // plan target is a soc, else an energy amount
+  float planEnergy = 0, capacity = 0; // capacity of the connected vehicle in kWh
+  int vehCount = 0;
+  String vehNames[8], vehTitles[8]; // evcc vehicle names and their titles
   String lp, veh, fin, planTime, planStart, planEnd;
   int mode = 0, soc = 0, limit = 0, planSoc = 0, batSoc = 0, minute = 0, slots = 0;
   float chargePower = 0, pv = 0, grid = 0, home = 0, bat = 0, price = 0;
@@ -75,8 +82,10 @@ QueueHandle_t posts;
 State pending;
 volatile bool fresh = false, postFailed = false;
 long lastEnc = 0;
-String toast1, toast2;
+String toast[4];
+bool toastCard = false;
 bool dirty = true;
+bool switching = false; // loadpoint picked, its first data not here yet
 
 // ---------- evcc API ----------
 
@@ -120,10 +129,14 @@ State poll() {
   next.integrated = doc["dev"] | false;
   next.continuous = doc["cont"] | false;
   next.switchDevice = doc["sw"] | false;
-  next.soc = doc["soc"] | 0;
-  next.limit = doc["lim"] | 0;
-  next.planSoc = doc["psoc"] | 0;
-  next.batSoc = doc["bsoc"] | 0;
+  // evcc sends these as floats: read as float, or a fraction would fall back to the default
+  next.soc = lroundf(doc["soc"] | 0.0f);
+  next.limit = lroundf(doc["lim"] | 0.0f);
+  next.planSoc = lroundf(doc["psoc"] | 0.0f);
+  next.socPlan = doc["sbp"] | false;
+  next.planEnergy = doc["pen"] | 0.0f;
+  next.capacity = doc["cap"] | 0.0f;
+  next.batSoc = lroundf(doc["bsoc"] | -1.0f); // -1: no home battery
   next.minute = doc["min"] | 0;
   next.chargePower = doc["cp"] | 0.0f;
   next.pv = doc["pv"] | 0.0f;
@@ -146,6 +159,11 @@ State poll() {
   for (JsonVariant title : doc["lps"].as<JsonArray>()) {
     if (next.lpCount == 8) break;
     next.lps[next.lpCount++] = title | "";
+  }
+  for (JsonArray v : doc["vt"].as<JsonArray>()) {
+    if (next.vehCount == 8) break;
+    next.vehNames[next.vehCount] = v[0] | "";
+    next.vehTitles[next.vehCount++] = v[1] | "";
   }
   return next;
 }
@@ -180,12 +198,33 @@ void netTask(void *) {
 
 // ---------- drawing ----------
 
+// y is the text baseline, as in the design
 void text(const String &s, int y, const lgfx::IFont *font, uint32_t color, int x = 120,
-          textdatum_t datum = middle_center) {
+          textdatum_t datum = baseline_center) {
   cv.setFont(font);
   cv.setTextColor(color);
   cv.setTextDatum(datum);
   cv.drawString(s.c_str(), x, y);
+}
+
+struct Run {
+  String s;
+  const lgfx::IFont *font;
+  uint32_t color;
+};
+
+// runs of text in different fonts on one baseline, centred as a whole
+void line(int y, std::initializer_list<Run> runs, int gap = 4) {
+  int width = -gap;
+  for (auto &r : runs) {
+    cv.setFont(r.font);
+    width += cv.textWidth(r.s.c_str()) + gap;
+  }
+  int x = 120 - width / 2;
+  for (auto &r : runs) {
+    text(r.s, y, r.font, r.color, x, baseline_left);
+    x += cv.textWidth(r.s.c_str()) + gap;
+  }
 }
 
 // anti-aliased ring segment, degrees clockwise from 3 o'clock, optionally with round ends
@@ -235,10 +274,16 @@ void dot(float angle, int radius, int size, uint32_t color) {
 // gauge spans 270 degrees, open at the bottom
 float gauge(float percent) { return 135 + constrain(percent, 0.0f, 100.0f) * 2.7f; }
 
-String kw(float w) { return String(w / 1000, 1); }
+#define DOT " \xC2\xB7 " // separator used in the design
+
+// below 50 W is zero, so no "-0.0"
+String kw(float w) { return String(fabsf(w) < 50 ? 0 : w / 1000, 1); }
 
 // unit of soc and limit: heating devices report a temperature
 const char *unit() { return st.heating ? "\xC2\xB0" "C" : "%"; }
+
+// soc or limit with its unit: "62 %" or "65°C"
+String value(int v) { return String(v) + (st.heating ? "" : " ") + unit(); }
 
 // mode name, followed by the evcc always-charge symbol (1x or endless)
 // evcc names: continuous devices (heat pumps) run Normal/Boost, switch devices turn On
@@ -258,13 +303,14 @@ int modeList(int *list) {
   return n;
 }
 
-void modeLabel(int i, int y, bool large, uint32_t color) {
+void modeLabel(int i, int y, bool large, uint32_t color, bool pill = false) {
   const Mode &m = MODES[i];
   const char *label = modeName(i);
-  const auto *font = large ? F_LARGE : F_MED;
+  const auto *font = large ? F_LARGE : pill ? F_MED : F_UNIT;
   int size = large ? 32 : 16, gap = large ? 8 : 5;
   cv.setFont(font);
   int width = cv.textWidth(label) + (m.icon16 ? gap + size : 0);
+  if (pill) cv.fillSmoothRoundRect(110 - width / 2, y - 9, width + 20, 18, 9, C_PILL);
   text(label, y, font, color, 120 - width / 2, middle_left);
   if (m.icon16)
     cv.drawXBitmap(120 + width / 2 - size, y - size / 2, large ? m.icon32 : m.icon16, size, size,
@@ -277,21 +323,21 @@ void drawHome() {
   dot(gauge(st.limit), 111, 5, C_WHITE);
   dot(gauge(st.limit), 111, 3, C_BG);
 
-  text(st.lp, 56, F_SMALL, C_GREY);
-  modeLabel(st.mode, 80, false, C_GREEN);
+  text(st.lp, 66, F_SMALL, C_GREY);
+  modeLabel(st.mode, 82, false, C_GREEN, true);
   if (!st.connected) {
-    text("--", 120, F_HUGE, C_DIM);
-    text("Not connected", 172, F_MED, C_WHITE);
+    text("--", 141, F_NUM52, C_DIM);
+    text("Not connected", 164, F_MED, C_WHITE);
     return;
   }
-  text(kw(st.chargePower), 120, F_HUGE, C_WHITE);
-  text("kW", 150, F_SMALL, C_GREY);
+  line(141, {{kw(st.chargePower), F_NUM52, C_WHITE}, {"kW", F_UNIT, C_GREY}});
   // heaters and other integrated devices have no vehicle
   if (st.integrated)
-    text(st.heating ? String(st.soc) + unit() : String(""), 174, F_MED, C_WHITE);
+    text(st.heating ? value(st.soc) : String(""), 164, F_MED, C_WHITE);
   else
-    text(st.veh.length() ? st.veh + " " + st.soc + "%" : String("Guest vehicle"), 174, F_MED, C_WHITE);
-  if (st.fin.length()) text(String(st.limit) + unit() + " at " + st.fin, 196, F_SMALL, C_GREY);
+    text(st.veh.length() ? st.veh + DOT + value(st.soc) : String("Guest vehicle"), 164, F_MED,
+         C_WHITE);
+  if (st.fin.length()) text(value(st.limit) + " at " + st.fin, 181, F_SMALL, C_GREY);
 }
 
 const int LIST_TOP = 62, LIST_HEIGHT = 116; // picker entries are drawn only between the arrows
@@ -327,7 +373,8 @@ void drawLoadpoints() {
     cv.setFont(F_LARGE);
     bool large = i == edit && cv.textWidth(st.lps[i].c_str()) < 190;
     cv.setClipRect(0, LIST_TOP, 240, LIST_HEIGHT);
-    text(st.lps[i], y, large ? F_LARGE : F_MED, i == edit ? C_GREEN : C_GREY);
+    text(st.lps[i], y, large ? F_LARGE : F_UNIT, i == edit ? C_GREEN : C_GREY, 120,
+         middle_center);
     cv.clearClipRect();
   }
 }
@@ -338,30 +385,43 @@ void drawLimit() {
   arc(135, gauge(min(st.soc, edit)), C_GREEN, true);
   dot(gauge(edit), 111, 8, C_WHITE);
 
-  text("Limit", 66, F_SMALL, C_GREY);
-  text(String(edit), 116, F_HUGE, C_WHITE);
-  text(unit(), 148, F_SMALL, C_GREY);
-  text(String(st.soc) + unit() + " now", 176, F_MED, C_WHITE);
+  text("Limit", 72, F_SMALL, C_GREY);
+  line(132, {{String(edit), F_NUM60, C_WHITE}, {unit(), F_UNIT, C_GREY}});
+  String now = value(st.soc) + " now";
+  // energy still to charge up to the edited limit
+  float add = (edit - st.soc) / 100.0f * st.capacity;
+  if (!st.heating && add >= 1) now += String(DOT "+") + String(add, 0) + " kWh";
+  text(now, 155, F_MED, C_WHITE);
+  text("Press to set", 175, F_SMALL, C_GREY);
 }
 
 void row(const char *label, const String &value, int y) {
-  text(label, y, F_SMALL, C_GREY, 52, middle_left);
-  text(value, y, F_MED, C_WHITE, 188, middle_right);
+  text(label, y, F_MED, C_GREY, 45, baseline_left);
+  text(value + " kW", y, F_MED, C_WHITE, 195, baseline_right);
 }
 
 void drawFlow() {
   // evcc signs: grid > 0 is import, battery > 0 is discharge
-  float in = st.pv + max(st.grid, 0.0f) + max(st.bat, 0.0f);
-  float solar = in > 0 ? st.pv / in * 360 : 0;
-  arc(-90, 270, C_GREY);
-  arc(-90, -90 + solar, C_GREEN);
+  // evcc energy bar: self-used solar, battery discharge, grid import, solar export
+  float out = max(-st.grid, 0.0f);
+  float parts[] = {max(st.pv - out, 0.0f), max(st.bat, 0.0f), max(st.grid, 0.0f), out};
+  const uint32_t colors[] = {C_GREEN, C_BATTERY, C_GREY, C_EXPORT};
+  float in = parts[0] + parts[1] + parts[2] + parts[3], from = -90;
+  if (in <= 0) arc(-88, 268, C_GREY);
+  for (int i = 0; in > 0 && i < 4; i++) {
+    float span = parts[i] / in * 360;
+    if (span > 4) arc(from + 2, from + span - 2, colors[i]);
+    from += span;
+  }
 
-  text(kw(st.pv), 62, F_LARGE, C_GREEN);
-  text("kW solar", 90, F_SMALL, C_GREY);
-  row("Grid", kw(st.grid), 118);
-  row("Home", kw(st.home), 142);
-  row("Car", kw(st.chargePower), 166);
-  row("Bat", kw(-st.bat) + " " + st.batSoc + "%", 190);
+  line(85, {{kw(st.pv), F_NUM36, C_GREEN}, {"kW solar", F_MED, C_GREY}});
+  row("Grid", kw(st.grid), 106);
+  row("Home", kw(st.home), 126);
+  row("Car", kw(st.chargePower), 145);
+  if (st.batSoc < 0) return;
+  // shown from the battery's side: + is charging
+  row("Battery", (st.bat <= -50 ? "+" : "") + kw(-st.bat), 165);
+  text(String("Battery ") + st.batSoc + " %", 185, F_SMALL, C_GREY);
 }
 
 void drawPlan() {
@@ -379,20 +439,45 @@ void drawPlan() {
   dot(st.minute / 4.0f - 90, 98, 3, C_WHITE);
 
   if (st.planTime.length()) {
-    text("Ready by", 66, F_SMALL, C_GREY);
-    text(st.planTime, 112, F_HUGE, C_WHITE);
-    text(String(st.planSoc) + "%  " + st.planStart + "-" + st.planEnd, 150, F_MED, C_WHITE);
+    // as in evcc: a plan is dimmed in off and fast mode, target is soc or energy
+    bool off = strcmp(MODES[st.mode].mode, "smart");
+    String target = st.socPlan && st.planSoc ? String(st.planSoc) + " %"
+                    : st.planEnergy > 0 ? String(st.planEnergy, 0) + " kWh" : String("");
+    String window = st.planStart.length() ? st.planStart + " to " + st.planEnd : String("");
+    text("Ready by", 79, F_SMALL, off ? C_DIM : C_GREY);
+    text(st.planTime, 125, F_NUM48, off ? C_DIM : C_WHITE);
+    text(target + (target.length() && window.length() ? DOT : "") + window, 150, F_MED,
+         off ? C_DIM : C_WHITE);
   } else {
-    text("No plan", 112, F_LARGE, C_DIM);
+    text("No plan", 130, F_LARGE, C_DIM);
   }
+  // average price of the planned hours, then the current price
+  float sum = 0;
+  int planned = 0;
+  for (int i = 0; i < st.slots; i++)
+    if (st.fc[i].planned) sum += st.fc[i].price, planned++;
   // shortcut: assumes a currency with 1/100 subunit, add a unit lookup if needed
-  text(String(st.price * 100, 1) + " ct/kWh", 176, F_SMALL, C_GREY);
+  String now = String(st.price * 100, 0) + " ct";
+  text(planned ? String(sum / planned * 100, 0) + " ct/kWh" DOT "now " + now : now + "/kWh", 169,
+       F_SMALL, C_GREY);
+}
+
+// RFID card with radio waves, as in the design
+void drawCard() {
+  cv.drawRoundRect(105, 61, 31, 22, 3, C_GREEN);
+  cv.drawRoundRect(106, 62, 29, 20, 2, C_GREEN);
+  cv.fillArc(111, 72, 5, 7, -49, 49, C_GREEN);
+  cv.fillArc(113, 72, 10, 12, -46, 46, C_GREEN);
+  cv.fillArc(115, 72, 14, 16, -40, 40, C_GREEN);
 }
 
 void drawToast() {
   arc(0, 360, C_GREEN);
-  text(toast1, 104, F_LARGE, C_WHITE);
-  text(toast2, 142, F_MED, C_GREEN);
+  if (toastCard) drawCard();
+  text(toast[0], 106, F_SMALL, C_GREY);
+  text(toast[1], 140, F_LARGE, C_WHITE);
+  text(toast[2], 164, F_MED, C_GREEN);
+  text(toast[3], 184, F_SMALL, C_GREY);
 }
 
 void draw() {
@@ -400,7 +485,7 @@ void draw() {
   if (view == TOAST) {
     drawToast();
   } else if (!st.ok) {
-    text(WiFi.isConnected() ? "evcc offline" : "No WiFi", 120, F_MED, C_GREY);
+    text(WiFi.isConnected() ? "evcc offline" : "No WiFi", 125, F_MED, C_GREY);
   } else {
     switch (view) {
       case HOME: drawHome(); break;
@@ -420,15 +505,20 @@ void draw() {
 
 // ---------- input ----------
 
-void showToast(const String &line1, const String &line2) {
-  toast1 = line1;
-  toast2 = line2;
+// label, title, green line, grey line; card shows the RFID symbol
+void showToast(const String &label, const String &title, const String &green,
+               const String &grey = "", bool card = false) {
+  toast[0] = label;
+  toast[1] = title;
+  toast[2] = green;
+  toast[3] = grey;
+  toastCard = card;
   view = TOAST;
   overlayAt = millis();
 }
 
 void onRotate(int steps) {
-  if (!st.ok) return;
+  if (!st.ok || switching) return;
   int list[MODE_COUNT], count = modeList(list);
   if (view == HOME) {
     view = MODE;
@@ -450,7 +540,7 @@ void onRotate(int steps) {
 }
 
 void onPress() {
-  if (!st.ok) return;
+  if (!st.ok || switching) return;
   switch (view) {
     case MODE: {
       int list[MODE_COUNT];
@@ -468,10 +558,14 @@ void onPress() {
       view = page;
       break;
     case LOADPOINTS:
+      if (edit + 1 == loadpoint) {
+        view = page = HOME;
+        break;
+      }
       loadpoint = edit + 1;
       prefs.putInt("lp", loadpoint);
       post(""); // poll the new loadpoint right away
-      view = page = HOME;
+      switching = true; // the picker stays until that poll is in, not the old loadpoint
       break;
     case HOME:
       view = LIMIT;
@@ -506,10 +600,14 @@ void onRfid() {
   for (auto &tag : TAGS) {
     if (uid != tag.uid) continue;
     post(String("/vehicle/") + tag.vehicle);
-    showToast("Vehicle", "assigning");
+    String title = tag.vehicle;
+    for (int i = 0; i < st.vehCount; i++)
+      if (st.vehNames[i] == tag.vehicle) title = st.vehTitles[i];
+    showToast("Vehicle", title, "Assigned to " + st.lp,
+              String(modeName(st.mode)) + DOT "limit " + value(st.limit), true);
     return;
   }
-  showToast("Unknown tag", uid);
+  showToast("Unknown tag", uid, "Not assigned", "", true);
 }
 
 void setup() {
@@ -524,6 +622,9 @@ void setup() {
   posts = xQueueCreate(4, 48);
   xTaskCreate(netTask, "net", 8192, nullptr, 1, nullptr);
   lastEnc = M5Dial.Encoder.read();
+#ifndef ARDUINO
+  if (const char *p = getenv("SIM_PAGE")) view = page = (View)atoi(p); // screenshots of other pages
+#endif
 }
 
 void loop() {
@@ -543,21 +644,31 @@ void loop() {
   auto touch = M5Dial.Touch.getDetail();
   if (touch.wasFlicked() && view < PAGES) {
     int dir = touch.distanceX() < 0 ? 1 : -1;
-    view = page = (View)((page + dir + PAGES) % PAGES);
+    int pages = st.heating ? PLAN : PAGES; // evcc has no plan for heating devices
+    view = page = (View)((page + dir + pages) % pages);
   }
 
   if (M5Dial.Rfid.PICC_IsNewCardPresent() && M5Dial.Rfid.PICC_ReadCardSerial()) onRfid();
 
+  if (switching) overlayAt = millis();
   // overlays close on their own: nothing is changed without a press
   if (view >= PAGES && millis() - overlayAt > (view == TOAST ? 3000 : 5000)) view = page;
 
   if (fresh) {
     xSemaphoreTake(lock, portMAX_DELAY);
     // drop a poll that was still in flight for the previous loadpoint
-    if (pending.loadpoint == loadpoint) st = pending;
+    if (pending.loadpoint == loadpoint) {
+      st = pending;
+      if (switching) view = page = HOME;
+      switching = false;
+    }
     fresh = false;
     xSemaphoreGive(lock);
     dirty = true;
+    if (st.heating && page == PLAN) {
+      if (view == PLAN) view = HOME;
+      page = HOME;
+    }
     // the saved loadpoint no longer exists in evcc
     if (st.ok && st.lpCount && loadpoint > st.lpCount) {
       loadpoint = 1;
@@ -566,7 +677,7 @@ void loop() {
   }
   if (postFailed) {
     postFailed = false;
-    showToast("Failed", "not set");
+    showToast("", "Failed", "Not set");
   }
 
   // picker lists slide to the selected entry instead of jumping

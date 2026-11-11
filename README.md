@@ -25,8 +25,9 @@ Nothing changes without a press. Mode and limit editors close after 5 s.
 ## Pages
 
 - **Home**: charge power, mode, vehicle and SoC. The ring is the SoC, the marker is the limit.
-- **Energy flow**: solar, grid, home, car and battery power. The ring is the solar share.
-- **Plan**: departure time, target SoC and charging window. The ring is a 24 h clock
+- **Energy flow**: solar, grid, home, car and battery power. The ring shows the sources as in evcc: self-used solar (green), battery discharge (darker green), grid import (grey), solar export (yellow).
+- **Plan**: departure time, target (SoC, or energy when the vehicle SoC is unknown) and
+  charging window. As in evcc: no plan page for heating devices, dimmed in off and fast mode. The ring is a 24 h clock
   of grid prices: bright green is planned charging, dark green is the cheapest third.
 
 ## Build
@@ -51,7 +52,7 @@ make run
 | Input | Stands for |
 |---|---|
 | Mouse wheel, or left / right arrow | Rotate |
-| Space or return | Press; hold for a long press |
+| Mouse click, space or return | Press; hold for a long press |
 | Mouse drag | Swipe |
 | T | RFID tag with UID `deadbeef` |
 

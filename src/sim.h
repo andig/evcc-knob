@@ -128,8 +128,8 @@ inline void xTaskCreate(void (*fn)(void *), const char *, int, void *arg, int, v
 
 // ---------- M5Dial ----------
 
-// Mouse wheel or left/right = rotate, space or return = press (hold = long press),
-// mouse drag = swipe, T = hold an RFID tag to the dial.
+// Mouse wheel or left/right = rotate; mouse click, space or return = press (hold = long
+// press); mouse drag = swipe; T = hold an RFID tag to the dial.
 struct SimDial {
   M5GFX &Display = M5.Display;
   m5::Touch_Class &Touch = M5.Touch;
@@ -141,7 +141,7 @@ struct SimDial {
   } Encoder;
 
   struct {
-    bool clicked = false, hold = false, forceHold = false;
+    bool clicked = false, hold = false, forceHold = false, forceClick = false;
     bool wasClicked() { return clicked; }
     bool wasHold() { return hold; }
   } BtnA;
@@ -175,8 +175,10 @@ struct SimDial {
     M5.update();
     const Uint8 *keys = SDL_GetKeyboardState(nullptr);
     static bool held[4];
+    int mx, my;
+    bool mouse = SDL_GetMouseState(&mx, &my) & SDL_BUTTON_LMASK;
     bool now[4] = {keys[SDL_SCANCODE_LEFT] != 0, keys[SDL_SCANCODE_RIGHT] != 0,
-                   keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_RETURN],
+                   keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_RETURN] || mouse,
                    keys[SDL_SCANCODE_T] != 0};
     bool hit[4], released = held[2] && !now[2];
     for (int i = 0; i < 4; i++) {
@@ -189,29 +191,37 @@ struct SimDial {
     // short press = click on release, 500 ms = long press
     static uint32_t downAt;
     static bool holdFired;
+    static int downX, downY;
     if (hit[2]) {
       downAt = millis();
       holdFired = false;
+      downX = mx;
+      downY = my;
     }
+    // a mouse click presses the button, but a drag is a swipe and must not press
+    if (mouse && abs(mx - downX) + abs(my - downY) > 10) holdFired = true;
     BtnA.hold = BtnA.forceHold || (now[2] && !holdFired && millis() - downAt >= 500);
     BtnA.forceHold = false;
     if (BtnA.hold) holdFired = true;
-    BtnA.clicked = released && !holdFired;
-    Rfid.present = hit[3];
+    BtnA.clicked = BtnA.forceClick || (released && !holdFired);
+    BtnA.forceClick = false;
+    Rfid.present = hit[3] || getenv("SIM_TAG");
   }
 };
 inline SimDial M5Dial;
 
 // SIM_SHOT=file.png saves the first frame that shows evcc data, then exits.
-// With SIM_ROTATE=n or SIM_HOLD=1 the dial is turned n steps or long-pressed first
+// With SIM_ROTATE=n, SIM_PRESS=1 or SIM_HOLD=1 the dial is turned, pressed or held first
 // and the next frame is saved.
 inline void simShot(M5Canvas &cv, bool ready) {
   const char *path = getenv("SIM_SHOT"), *rotate = getenv("SIM_ROTATE");
   static bool done = false;
   if (!path || !ready) return;
-  if ((rotate || getenv("SIM_HOLD")) && !done) {
+  const char *press = getenv("SIM_PRESS");
+  if ((rotate || press || getenv("SIM_HOLD")) && !done) {
     done = true;
     if (rotate) M5Dial.Encoder.count += atoi(rotate) * ENC_STEP;
+    else if (press) M5Dial.BtnA.forceClick = true;
     else M5Dial.BtnA.forceHold = true;
     return;
   }
