@@ -12,13 +12,13 @@ def hm: if . == null then null else strflocaltime("%H:%M") end;
 | {
   min: (now | localtime | .[3] * 60 + .[4]),
   lp: $l.title, mode: $l.mode, cp: $l.chargePower, soc: $l.vehicleSoc,
-  lim: $l.effectiveLimitSoc, con: $l.connected, veh: $l.vehicleTitle,
+  ac: $l.alwaysCharge, lim: $l.effectiveLimitSoc, con: $l.connected, veh: $l.vehicleTitle,
   fin: (if ($l.chargeRemainingDuration // 0) > 0 then now + $l.chargeRemainingDuration | hm else null end),
   pt: ($l.effectivePlanTime | ep | hm), psoc: $l.effectivePlanSoc,
   ps: ($ps | hm), pe: ($pe | hm),
   pv: .pvPower, grid: .grid.power, home: .homePower,
   bat: .battery.power, bsoc: .battery.soc,
-  price: .tariffGrid,
+  price: .tariffGrid, lps: [.loadpoints[].title],
   fc: ([(.forecast.grid // [])[] | select(.[1] > now)]
     | group_by(.[0] / 3600 | floor) | .[0:24]
     | map((.[0][0] / 3600 | floor * 3600) as $h | [

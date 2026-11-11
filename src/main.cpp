@@ -1,20 +1,44 @@
+#include "config.h"
+#ifdef ARDUINO
 #include <M5Dial.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
+#else
+#include "sim.h"
+#endif
 #include <ArduinoJson.h>
-#include "config.h"
 #include "query.h"
+#include "icons.h"
+#include "fonts.h"
 
 const uint32_t C_BG = 0x020318, C_TRACK = 0x1C2030, C_SEG = 0x2A2E40, C_GREY = 0x93949E,
                C_DIM = 0x6F7080, C_GREEN = 0x0FDE41, C_DARKGREEN = 0x0B5C26, C_WHITE = 0xFFFFFF;
 
-const auto *F_SMALL = &fonts::FreeSans9pt7b;
-const auto *F_MED = &fonts::FreeSansBold9pt7b;
-const auto *F_LARGE = &fonts::FreeSansBold18pt7b;
-const auto *F_HUGE = &fonts::FreeSansBold24pt7b;
+lgfx::VLWfont fontSmall, fontMed, fontLarge, fontHuge;
+const lgfx::IFont *F_SMALL = &fontSmall, *F_MED = &fontMed, *F_LARGE = &fontLarge, *F_HUGE = &fontHuge;
 
-const char *MODES[] = {"off", "pv", "minpv", "now"};
-const char *MODE_LABELS[] = {"Off", "Solar", "Min+Solar", "Fast"};
+void loadFonts() {
+  static lgfx::PointerWrapper data[] = {{FONT_SMALL, sizeof(FONT_SMALL)},
+                                        {FONT_MED, sizeof(FONT_MED)},
+                                        {FONT_LARGE, sizeof(FONT_LARGE)},
+                                        {FONT_HUGE, sizeof(FONT_HUGE)}};
+  lgfx::VLWfont *all[] = {&fontSmall, &fontMed, &fontLarge, &fontHuge};
+  for (int i = 0; i < 4; i++) all[i]->loadFont(&data[i]);
+}
+
+struct Mode {
+  const char *mode, *always, *label; // always: evcc alwaysCharge, null = leave as is
+  const uint8_t *icon16, *icon32;
+};
+const Mode MODES[] = {
+    {"off", nullptr, "Off", nullptr, nullptr},
+    {"smart", "off", "Smart", nullptr, nullptr},
+    {"smart", "once", "Smart", ICON_ONCE_16, ICON_ONCE_32},
+    {"smart", "on", "Smart", ICON_ALWAYS_16, ICON_ALWAYS_32},
+    {"now", nullptr, "Fast", nullptr, nullptr},
+};
+const int MODE_COUNT = 5;
 
 struct Slot {
   uint8_t hour;
@@ -28,15 +52,19 @@ struct State {
   int mode = 0, soc = 0, limit = 0, planSoc = 0, batSoc = 0, minute = 0, slots = 0;
   float chargePower = 0, pv = 0, grid = 0, home = 0, bat = 0, price = 0;
   Slot fc[24];
+  int loadpoint = 0, lpCount = 0; // loadpoint this state was polled for
+  String lps[8];                  // titles of all loadpoints
 } st;
 
-enum View { HOME, FLOW, PLAN, MODE, LIMIT, TOAST };
+enum View { HOME, FLOW, PLAN, MODE, LIMIT, LOADPOINTS, TOAST };
 const int PAGES = 3; // HOME, FLOW, PLAN are swipeable pages, the rest overlays
 
 M5Canvas cv(&M5Dial.Display);
+Preferences prefs;
 View view = HOME, page = HOME;
-int edit = 0;             // value being edited in MODE/LIMIT
+int edit = 0;             // value being edited in MODE/LIMIT/LOADPOINTS
 uint32_t overlayAt = 0;   // last interaction with an overlay
+volatile int loadpoint = LOADPOINT; // 1-based, LOADPOINT is only the first-boot default
 
 // handover from the network task: st itself is only touched by the UI loop
 SemaphoreHandle_t lock;
@@ -64,13 +92,14 @@ String urlencode(const String &s) {
 }
 
 State poll() {
-  static const String url = String(EVCC_URL) + "/api/state?jq=" +
-                            urlencode(String(LOADPOINT - 1) + " as $i|" + QUERY);
+  static const String base = String(EVCC_URL) + "/api/state?jq=",
+                      query = urlencode(String(" as $i|") + QUERY);
   State next;
+  next.loadpoint = loadpoint;
   if (!WiFi.isConnected()) return next;
   HTTPClient http;
   http.setTimeout(3000);
-  http.begin(url);
+  http.begin(base + (next.loadpoint - 1) + query);
   JsonDocument doc;
   bool ok = http.GET() == HTTP_CODE_OK && !deserializeJson(doc, http.getString());
   http.end();
@@ -97,20 +126,28 @@ State poll() {
   next.price = doc["price"] | 0.0f;
 
   const char *mode = doc["mode"] | "off";
-  for (int i = 0; i < 4; i++)
-    if (!strcmp(mode, MODES[i])) next.mode = i;
+  const char *always = doc["ac"] | "off";
+  for (int i = 0; i < MODE_COUNT; i++)
+    if (!strcmp(mode, MODES[i].mode) && (!MODES[i].always || !strcmp(always, MODES[i].always)))
+      next.mode = i;
 
   next.slots = 0;
   for (JsonArray s : doc["fc"].as<JsonArray>()) {
     if (next.slots == 24) break;
     next.fc[next.slots++] = {s[0].as<uint8_t>(), s[1].as<float>(), s[2].as<int>() == 1};
   }
+  for (JsonVariant title : doc["lps"].as<JsonArray>()) {
+    if (next.lpCount == 8) break;
+    next.lps[next.lpCount++] = title | "";
+  }
   return next;
 }
 
+// queue a POST for the current loadpoint; an empty path only triggers a poll
 void post(const String &path) {
-  char buf[48];
-  strlcpy(buf, path.c_str(), sizeof(buf));
+  char buf[48] = "";
+  if (path.length())
+    strlcpy(buf, (String("/api/loadpoints/") + loadpoint + path).c_str(), sizeof(buf));
   xQueueSend(posts, buf, 0);
 }
 
@@ -119,10 +156,10 @@ void netTask(void *) {
   char path[48];
   for (;;) {
     // a queued POST wakes the task early and is followed by a fresh poll
-    if (xQueueReceive(posts, path, pdMS_TO_TICKS(3000))) {
+    if (xQueueReceive(posts, path, pdMS_TO_TICKS(3000)) && path[0]) {
       HTTPClient http;
       http.setTimeout(3000);
-      http.begin(String(EVCC_URL) + "/api/loadpoints/" + LOADPOINT + path);
+      http.begin(String(EVCC_URL) + path);
       if (http.POST("") != HTTP_CODE_OK) postFailed = true;
       http.end();
     }
@@ -141,16 +178,51 @@ void text(const String &s, int y, const lgfx::IFont *font, uint32_t color, int x
   cv.setFont(font);
   cv.setTextColor(color);
   cv.setTextDatum(datum);
-  cv.drawString(s, x, y);
+  cv.drawString(s.c_str(), x, y);
 }
 
-void arc(float from, float to, uint32_t color) {
-  if (to > from) cv.fillArc(120, 120, 106, 116, from, to, color);
+// anti-aliased ring segment, degrees clockwise from 3 o'clock, optionally with round ends
+void arc(float from, float to, uint32_t color, bool round = false) {
+  const float R0 = 106, R1 = 116, CAP = 5;
+  float span = to - from;
+  if (span <= 0) return;
+  float capX[2], capY[2];
+  for (int i = 0; i < 2; i++) {
+    float rad = (i ? to : from) * DEG_TO_RAD;
+    capX[i] = (R0 + R1) / 2 * cosf(rad);
+    capY[i] = (R0 + R1) / 2 * sinf(rad);
+  }
+  int r = color >> 16 & 0xFF, g = color >> 8 & 0xFF, b = color & 0xFF;
+
+  for (int y = 0; y < 240; y++) {
+    for (int x = 0; x < 240; x++) {
+      float dx = x - 120, dy = y - 120, d2 = dx * dx + dy * dy;
+      if (d2 < (R0 - 1) * (R0 - 1) || d2 > (R1 + 1) * (R1 + 1)) continue;
+      // coverage: distance in pixels to the nearest edge, 0.5 on the edge itself
+      float d = sqrtf(d2), a = min(d - R0, R1 - d) + 0.5f;
+      if (span < 360) {
+        float t = fmodf(atan2f(dy, dx) / DEG_TO_RAD - from, 360);
+        if (t < 0) t += 360;
+        float along = t <= span ? min(t, span - t) : -min(t - span, 360 - t);
+        a = min(a, along * (float)DEG_TO_RAD * d + 0.5f);
+        for (int i = 0; round && i < 2; i++)
+          a = max(a, min(CAP + 0.5f - hypotf(dx - capX[i], dy - capY[i]), 1.0f));
+      }
+      if (a <= 0) continue;
+      if (a >= 1) {
+        cv.drawPixel(x, y, color);
+        continue;
+      }
+      auto bg = cv.readPixelRGB(x, y);
+      cv.drawPixel(x, y, lgfx::color888(bg.r + (r - bg.r) * a, bg.g + (g - bg.g) * a,
+                                        bg.b + (b - bg.b) * a));
+    }
+  }
 }
 
 void dot(float angle, int radius, int size, uint32_t color) {
   float rad = angle * DEG_TO_RAD;
-  cv.fillCircle(120 + radius * cosf(rad), 120 + radius * sinf(rad), size, color);
+  cv.fillSmoothCircle(120 + radius * cosf(rad), 120 + radius * sinf(rad), size, color);
 }
 
 // gauge spans 270 degrees, open at the bottom
@@ -158,14 +230,27 @@ float gauge(float percent) { return 135 + constrain(percent, 0.0f, 100.0f) * 2.7
 
 String kw(float w) { return String(w / 1000, 1); }
 
+// mode name, followed by the evcc always-charge symbol (1x or endless)
+void modeLabel(int i, int y, bool large, uint32_t color) {
+  const Mode &m = MODES[i];
+  const auto *font = large ? F_LARGE : F_MED;
+  int size = large ? 32 : 16, gap = large ? 8 : 5;
+  cv.setFont(font);
+  int width = cv.textWidth(m.label) + (m.icon16 ? gap + size : 0);
+  text(m.label, y, font, color, 120 - width / 2, middle_left);
+  if (m.icon16)
+    cv.drawXBitmap(120 + width / 2 - size, y - size / 2, large ? m.icon32 : m.icon16, size, size,
+                   color);
+}
+
 void drawHome() {
-  arc(135, 405, C_TRACK);
-  arc(135, gauge(st.soc), C_GREEN);
+  arc(135, 405, C_TRACK, true);
+  arc(135, gauge(st.soc), C_GREEN, true);
   dot(gauge(st.limit), 111, 5, C_WHITE);
   dot(gauge(st.limit), 111, 3, C_BG);
 
   text(st.lp, 56, F_SMALL, C_GREY);
-  text(MODE_LABELS[st.mode], 80, F_MED, C_GREEN);
+  modeLabel(st.mode, 80, false, C_GREEN);
   if (!st.connected) {
     text("--", 120, F_HUGE, C_DIM);
     text("Not connected", 172, F_MED, C_WHITE);
@@ -177,22 +262,40 @@ void drawHome() {
   if (st.fin.length()) text(String(st.limit) + "% at " + st.fin, 196, F_SMALL, C_GREY);
 }
 
+// arrows above and below a picker list when entries are hidden there
+void listArrows(int count) {
+  if (edit > 1) cv.fillTriangle(120, 46, 112, 56, 128, 56, C_DIM);
+  if (edit < count - 2) cv.fillTriangle(120, 194, 112, 184, 128, 184, C_DIM);
+}
+
 void drawMode() {
-  for (int i = 0; i < 4; i++) {
-    arc(135 + i * 70, 195 + i * 70, i == edit ? C_GREEN : C_SEG);
+  for (int i = 0; i < MODE_COUNT; i++) {
+    arc(135 + i * 56, 181 + i * 56, i == edit ? C_GREEN : C_SEG, true);
     int y = 120 + (i - edit) * 38;
     if (y < 45 || y > 195) continue;
-    if (i == edit)
-      text(MODE_LABELS[i], y, F_LARGE, C_GREEN);
-    else
-      text(MODE_LABELS[i], y, F_MED, C_GREY);
+    modeLabel(i, y, i == edit, i == edit ? C_GREEN : C_GREY);
+  }
+  listArrows(MODE_COUNT);
+}
+
+void drawLoadpoints() {
+  listArrows(st.lpCount);
+  float step = 270.0f / st.lpCount;
+  for (int i = 0; i < st.lpCount; i++) {
+    arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
+    int y = 120 + (i - edit) * 38;
+    if (y < 45 || y > 195) continue;
+    // long titles do not fit the large font
+    cv.setFont(F_LARGE);
+    bool large = i == edit && cv.textWidth(st.lps[i].c_str()) < 190;
+    text(st.lps[i], y, large ? F_LARGE : F_MED, i == edit ? C_GREEN : C_GREY);
   }
 }
 
 void drawLimit() {
-  arc(135, 405, C_TRACK);
-  arc(135, gauge(edit), C_DARKGREEN);
-  arc(135, gauge(min(st.soc, edit)), C_GREEN);
+  arc(135, 405, C_TRACK, true);
+  arc(135, gauge(edit), C_DARKGREEN, true);
+  arc(135, gauge(min(st.soc, edit)), C_GREEN, true);
   dot(gauge(edit), 111, 8, C_WHITE);
 
   text("Limit", 66, F_SMALL, C_GREY);
@@ -265,10 +368,14 @@ void draw() {
       case PLAN: drawPlan(); break;
       case MODE: drawMode(); break;
       case LIMIT: drawLimit(); break;
+      case LOADPOINTS: drawLoadpoints(); break;
       default: break;
     }
   }
   cv.pushSprite(0, 0);
+#ifndef ARDUINO
+  simShot(cv, st.ok);
+#endif
 }
 
 // ---------- input ----------
@@ -287,9 +394,11 @@ void onRotate(int steps) {
     edit = st.mode;
   }
   if (view == MODE)
-    edit = constrain(edit + steps, 0, 3);
+    edit = constrain(edit + steps, 0, MODE_COUNT - 1);
   else if (view == LIMIT)
     edit = constrain(edit + steps * 5, 20, 100);
+  else if (view == LOADPOINTS)
+    edit = constrain(edit + steps, 0, st.lpCount - 1);
   else
     return;
   overlayAt = millis();
@@ -300,7 +409,8 @@ void onPress() {
   if (!st.ok) return;
   switch (view) {
     case MODE:
-      post(String("/mode/") + MODES[edit]);
+      post(String("/mode/") + MODES[edit].mode);
+      if (MODES[edit].always) post(String("/alwayscharge/") + MODES[edit].always);
       st.mode = edit; // shown at once, the next poll confirms or reverts it
       view = page;
       break;
@@ -308,6 +418,12 @@ void onPress() {
       post(String("/limitsoc/") + edit);
       st.limit = edit;
       view = page;
+      break;
+    case LOADPOINTS:
+      loadpoint = edit + 1;
+      prefs.putInt("lp", loadpoint);
+      post(""); // poll the new loadpoint right away
+      view = page = HOME;
       break;
     case HOME:
       view = LIMIT;
@@ -318,6 +434,15 @@ void onPress() {
       view = page = HOME;
   }
   M5Dial.Speaker.tone(8000, 20);
+}
+
+// long press on a page opens the loadpoint picker
+void onHold() {
+  if (!st.ok || view >= PAGES) return;
+  view = LOADPOINTS;
+  edit = loadpoint - 1;
+  overlayAt = millis();
+  M5Dial.Speaker.tone(4000, 40);
 }
 
 void onRfid() {
@@ -343,7 +468,10 @@ void setup() {
   auto cfg = M5.config();
   M5Dial.begin(cfg, true, true); // encoder, RFID
   cv.createSprite(240, 240);
+  loadFonts();
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  prefs.begin("knob");
+  loadpoint = prefs.getInt("lp", LOADPOINT);
   lock = xSemaphoreCreateMutex();
   posts = xQueueCreate(4, 48);
   xTaskCreate(netTask, "net", 8192, nullptr, 1, nullptr);
@@ -361,7 +489,8 @@ void loop() {
     onRotate(steps);
   }
 
-  if (M5Dial.BtnA.wasPressed()) onPress();
+  if (M5Dial.BtnA.wasClicked()) onPress();
+  if (M5Dial.BtnA.wasHold()) onHold();
 
   auto touch = M5Dial.Touch.getDetail();
   if (touch.wasFlicked() && view < PAGES) {
@@ -376,10 +505,16 @@ void loop() {
 
   if (fresh) {
     xSemaphoreTake(lock, portMAX_DELAY);
-    st = pending;
+    // drop a poll that was still in flight for the previous loadpoint
+    if (pending.loadpoint == loadpoint) st = pending;
     fresh = false;
     xSemaphoreGive(lock);
     dirty = true;
+    // the saved loadpoint no longer exists in evcc
+    if (st.ok && st.lpCount && loadpoint > st.lpCount) {
+      loadpoint = 1;
+      post("");
+    }
   }
   if (postFailed) {
     postFailed = false;

@@ -5,7 +5,14 @@ One dial controls one loadpoint: it shows the charging state and sets mode, limi
 
 Status: compiles, not yet tested on hardware.
 
-![Design of the six screens: home, mode, limit, energy flow, plan, RFID](docs/screens.svg)
+<p>
+  <img src="docs/main.png" width="240" alt="Home: charge power, mode and vehicle SoC">
+  <img src="docs/mode.png" width="240" alt="Rotate: pick the charge mode">
+  <img src="docs/limit.png" width="240" alt="Press, then rotate: set the SoC limit">
+  <img src="docs/flow.png" width="240" alt="Swipe: energy flow">
+  <img src="docs/plan.png" width="240" alt="Swipe: plan and 24 h price ring">
+  <img src="docs/rfid.png" width="240" alt="RFID tag: vehicle assigned">
+</p>
 
 The image is the design. The firmware uses built-in fonts and simpler shapes.
 
@@ -13,10 +20,11 @@ The image is the design. The firmware uses built-in fonts and simpler shapes.
 
 | Input | Action |
 |---|---|
-| Rotate (on home) | Pick mode: Off, Solar, Min+Solar, Fast. Press to set. |
+| Rotate (on home) | Pick mode: Off, Smart, Smart 1× (always charge once), Smart ∞ (always charge), Fast. Press to set. |
 | Press (on home) | Edit the SoC limit in 5% steps. Press to set. |
 | Swipe left/right | Switch page: home, energy flow, plan. |
 | Press (other pages) | Back to home. |
+| Long press | Pick the loadpoint. Rotate, press to select. The choice is saved. |
 | RFID tag | Assign the mapped vehicle to the loadpoint. |
 
 Nothing changes without a press. Mode and limit editors close after 5 s.
@@ -39,6 +47,24 @@ pio run -t upload
 
 Without a PlatformIO install: `uvx platformio run -t upload`.
 
+## Simulator
+
+The same code runs on a desktop against a real evcc. Needs SDL2 (`brew install sdl2`).
+
+```sh
+make run
+```
+
+| Input | Stands for |
+|---|---|
+| Mouse wheel, or left / right arrow | Rotate |
+| Space or return | Press; hold for a long press |
+| Mouse drag | Swipe |
+| T | RFID tag with UID `deadbeef` |
+
+Mode, limit and vehicle changes are sent to the evcc in `EVCC_URL`, as on the device.
+`SIM_SHOT=file.png pio run -e sim -t exec` saves the first frame with data and exits.
+
 ## Configuration
 
 All settings are in `include/config.h`, which is not committed.
@@ -47,7 +73,7 @@ All settings are in `include/config.h`, which is not committed.
 |---|---|
 | `WIFI_SSID`, `WIFI_PASS` | WiFi credentials |
 | `EVCC_URL` | evcc base URL, for example `http://evcc.local:7070`, no trailing slash |
-| `LOADPOINT` | Loadpoint number, 1-based as in the evcc API |
+| `LOADPOINT` | Loadpoint shown on first boot, 1-based as in the evcc API |
 | `ENC_STEP` | Encoder counts per detent. Change it if one click moves no step or several. |
 | `TAGS` | RFID tag UID (lowercase hex) to evcc vehicle name |
 
@@ -64,9 +90,15 @@ The vehicle name is the evcc name (such as `vehicle_1`), not the title.
 - The UI loop never waits for the network. A changed mode or limit is shown at once
   and confirmed by the next poll.
 
+## Fonts
+
+The firmware embeds [Montserrat](https://github.com/JulietaUla/Montserrat) (SIL Open Font
+License, see `tools/Montserrat-OFL.txt`) as anti-aliased bitmap fonts in `src/fonts.h`.
+To change sizes or characters, edit `tools/mkfonts.py` and run
+`uv run --with pillow python tools/mkfonts.py <dir with Montserrat-*.ttf>`.
+
 ## Limitations
 
 - Plain HTTP only.
-- One loadpoint per dial, set at build time.
 - Prices are shown as ct/kWh, which assumes a currency with a 1/100 subunit.
 - No WiFi setup screen and no over-the-air update: settings need a rebuild.
