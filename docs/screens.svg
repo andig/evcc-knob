@@ -6,15 +6,14 @@
       <circle cx="360" cy="360" r="320" fill="#26272f" stroke="#3a3b45" stroke-width="2"/>
       <circle cx="360" cy="360" r="240" fill="#020318"/>
     </g>
-    <circle id="ring" cx="240" cy="240" r="222" fill="none" stroke-width="20"/>
   </defs>
 
   <!-- 1 home -->
   <g transform="translate(0,0) scale(.5)">
     <use href="#shell"/>
     <g transform="translate(120,120)">
-      <use href="#ring" stroke="#1c2030" stroke-linecap="round" pathLength="360" stroke-dasharray="270 360" transform="rotate(135 240 240)"/>
-      <use href="#ring" stroke="#0fde41" stroke-linecap="round" pathLength="360" stroke-dasharray="167.4 360" transform="rotate(135 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#1c2030" stroke-linecap="round" pathLength="360" stroke-dasharray="270 360" transform="rotate(135 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0fde41" stroke-linecap="round" pathLength="360" stroke-dasharray="167.4 360" transform="rotate(135 240 240)"/>
       <circle cx="459.3" cy="205.3" r="8" fill="#020318" stroke="#fff" stroke-width="4"/>
       <text x="240" y="128" font-size="22" font-weight="500" fill="#93949e">Garage</text>
       <rect x="184" y="146" width="112" height="40" rx="20" fill="#0b3d1c"/>
@@ -30,8 +29,8 @@
   <g transform="translate(360,0) scale(.5)">
     <use href="#shell"/>
     <g transform="translate(120,120)">
-      <use href="#ring" stroke="#2a2e40" pathLength="360" stroke-dasharray="60 10 60 10 60 10 60 360" transform="rotate(135 240 240)"/>
-      <use href="#ring" stroke="#0fde41" pathLength="360" stroke-dasharray="60 360" stroke-dashoffset="-70" transform="rotate(135 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#2a2e40" pathLength="360" stroke-dasharray="60 10 60 10 60 10 60 360" transform="rotate(135 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0fde41" pathLength="360" stroke-dasharray="60 360" stroke-dashoffset="-70" transform="rotate(135 240 240)"/>
       <text x="240" y="110" font-size="22" font-weight="500" fill="#93949e">Mode</text>
       <text x="240" y="162" font-size="30" font-weight="600" fill="#6f7080">Off</text>
       <text x="240" y="236" font-size="64" font-weight="700" fill="#0fde41">Solar</text>
@@ -46,9 +45,9 @@
   <g transform="translate(720,0) scale(.5)">
     <use href="#shell"/>
     <g transform="translate(120,120)">
-      <use href="#ring" stroke="#1c2030" stroke-linecap="round" pathLength="360" stroke-dasharray="270 360" transform="rotate(135 240 240)"/>
-      <use href="#ring" stroke="#0b5c26" stroke-linecap="round" pathLength="360" stroke-dasharray="216 360" transform="rotate(135 240 240)"/>
-      <use href="#ring" stroke="#0fde41" stroke-linecap="round" pathLength="360" stroke-dasharray="167.4 360" transform="rotate(135 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#1c2030" stroke-linecap="round" pathLength="360" stroke-dasharray="270 360" transform="rotate(135 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0b5c26" stroke-linecap="round" pathLength="360" stroke-dasharray="216 360" transform="rotate(135 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0fde41" stroke-linecap="round" pathLength="360" stroke-dasharray="167.4 360" transform="rotate(135 240 240)"/>
       <circle cx="459.3" cy="205.3" r="16" fill="#fff" stroke="#020318" stroke-width="4"/>
       <text x="240" y="130" font-size="22" font-weight="500" fill="#93949e">Limit</text>
       <text x="240" y="272"><tspan font-size="120" font-weight="700" fill="#fff">80</tspan><tspan font-size="36" font-weight="600" fill="#93949e" dx="8">%</tspan></text>
@@ -62,8 +61,8 @@
   <g transform="translate(0,400) scale(.5)">
     <use href="#shell"/>
     <g transform="translate(120,120)">
-      <use href="#ring" stroke="#0fde41" pathLength="100" stroke-dasharray="92.5 100" transform="rotate(-90 240 240)"/>
-      <use href="#ring" stroke="#93949e" pathLength="100" stroke-dasharray="5.5 100" stroke-dashoffset="-93.5" transform="rotate(-90 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0fde41" pathLength="100" stroke-dasharray="92.5 100" transform="rotate(-90 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#93949e" pathLength="100" stroke-dasharray="5.5 100" stroke-dashoffset="-93.5" transform="rotate(-90 240 240)"/>
       <text x="240" y="150"><tspan font-size="72" font-weight="700" fill="#0fde41">5.8</tspan><tspan font-size="26" font-weight="600" fill="#93949e" dx="8">kW solar</tspan></text>
       <g font-size="24" font-weight="600">
         <g text-anchor="start" fill="#93949e">
@@ -88,9 +87,9 @@
   <g transform="translate(360,400) scale(.5)">
     <use href="#shell"/>
     <g transform="translate(120,120)">
-      <use href="#ring" stroke="#2a2e40" pathLength="24" stroke-dasharray="0.9 0.1" transform="rotate(-90 240 240)"/>
-      <use href="#ring" stroke="#0b5c26" pathLength="24" stroke-dasharray="0.9 0.1 0.9 0.1 0.9 0.1 0.9 0.1 0.9 24" stroke-dashoffset="-11" transform="rotate(-90 240 240)"/>
-      <use href="#ring" stroke="#0fde41" pathLength="24" stroke-dasharray="0.9 0.1 0.9 0.1 0.9 0.1 0.9 24" stroke-dashoffset="-1" transform="rotate(-90 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#2a2e40" pathLength="24" stroke-dasharray="0.9 0.1" transform="rotate(-90 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0b5c26" pathLength="24" stroke-dasharray="0.9 0.1 0.9 0.1 0.9 0.1 0.9 0.1 0.9 24" stroke-dashoffset="-11" transform="rotate(-90 240 240)"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0fde41" pathLength="24" stroke-dasharray="0.9 0.1 0.9 0.1 0.9 0.1 0.9 24" stroke-dashoffset="-1" transform="rotate(-90 240 240)"/>
       <circle cx="119" cy="78.5" r="6" fill="#fff"/>
       <text x="240" y="140" font-size="22" font-weight="500" fill="#93949e">Ready by</text>
       <text x="240" y="252" font-size="96" font-weight="700" fill="#fff">07:00</text>
@@ -104,7 +103,7 @@
   <g transform="translate(720,400) scale(.5)">
     <use href="#shell"/>
     <g transform="translate(120,120)">
-      <use href="#ring" stroke="#0fde41"/>
+      <circle cx="240" cy="240" r="222" fill="none" stroke-width="20" stroke="#0fde41"/>
       <g transform="translate(204,96) scale(3)" fill="none" stroke="#0fde41" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <rect x="2" y="5" width="20" height="14" rx="2"/>
         <path d="M9 15a4 4 0 0 0 0-6M12.5 17a7 7 0 0 0 0-10M16 18.5a10 10 0 0 0 0-13"/>
