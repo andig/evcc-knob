@@ -48,6 +48,8 @@ struct Slot {
 
 struct State {
   bool ok = false, connected = false;
+  bool heating = false, integrated = false; // heating: soc and limit are temperatures
+  bool continuous = false, switchDevice = false; // change the mode names and list, as in evcc
   String lp, veh, fin, planTime, planStart, planEnd;
   int mode = 0, soc = 0, limit = 0, planSoc = 0, batSoc = 0, minute = 0, slots = 0;
   float chargePower = 0, pv = 0, grid = 0, home = 0, bat = 0, price = 0;
@@ -63,6 +65,7 @@ M5Canvas cv(&M5Dial.Display);
 Preferences prefs;
 View view = HOME, page = HOME;
 int edit = 0;             // value being edited in MODE/LIMIT/LOADPOINTS
+float scrollPos = 0;      // picker list position, eases towards edit
 uint32_t overlayAt = 0;   // last interaction with an overlay
 volatile int loadpoint = LOADPOINT; // 1-based, LOADPOINT is only the first-boot default
 
@@ -113,6 +116,10 @@ State poll() {
   next.planStart = doc["ps"] | "";
   next.planEnd = doc["pe"] | "";
   next.connected = doc["con"] | false;
+  next.heating = doc["heat"] | false;
+  next.integrated = doc["dev"] | false;
+  next.continuous = doc["cont"] | false;
+  next.switchDevice = doc["sw"] | false;
   next.soc = doc["soc"] | 0;
   next.limit = doc["lim"] | 0;
   next.planSoc = doc["psoc"] | 0;
@@ -230,14 +237,35 @@ float gauge(float percent) { return 135 + constrain(percent, 0.0f, 100.0f) * 2.7
 
 String kw(float w) { return String(w / 1000, 1); }
 
+// unit of soc and limit: heating devices report a temperature
+const char *unit() { return st.heating ? "\xC2\xB0" "C" : "%"; }
+
 // mode name, followed by the evcc always-charge symbol (1x or endless)
+// evcc names: continuous devices (heat pumps) run Normal/Boost, switch devices turn On
+const char *modeName(int i) {
+  bool now = !strcmp(MODES[i].mode, "now");
+  if (st.continuous && i == 0) return "Normal";
+  if (st.continuous && now) return "Boost";
+  if (st.switchDevice && now) return "On";
+  return MODES[i].label;
+}
+
+// modes offered in the picker: switch devices have no always-charge variants
+int modeList(int *list) {
+  int n = 0;
+  for (int i = 0; i < MODE_COUNT; i++)
+    if (!(st.switchDevice && MODES[i].icon16)) list[n++] = i;
+  return n;
+}
+
 void modeLabel(int i, int y, bool large, uint32_t color) {
   const Mode &m = MODES[i];
+  const char *label = modeName(i);
   const auto *font = large ? F_LARGE : F_MED;
   int size = large ? 32 : 16, gap = large ? 8 : 5;
   cv.setFont(font);
-  int width = cv.textWidth(m.label) + (m.icon16 ? gap + size : 0);
-  text(m.label, y, font, color, 120 - width / 2, middle_left);
+  int width = cv.textWidth(label) + (m.icon16 ? gap + size : 0);
+  text(label, y, font, color, 120 - width / 2, middle_left);
   if (m.icon16)
     cv.drawXBitmap(120 + width / 2 - size, y - size / 2, large ? m.icon32 : m.icon16, size, size,
                    color);
@@ -258,9 +286,15 @@ void drawHome() {
   }
   text(kw(st.chargePower), 120, F_HUGE, C_WHITE);
   text("kW", 150, F_SMALL, C_GREY);
-  text(st.veh.length() ? st.veh + " " + st.soc + "%" : String("Guest vehicle"), 174, F_MED, C_WHITE);
-  if (st.fin.length()) text(String(st.limit) + "% at " + st.fin, 196, F_SMALL, C_GREY);
+  // heaters and other integrated devices have no vehicle
+  if (st.integrated)
+    text(st.heating ? String(st.soc) + unit() : String(""), 174, F_MED, C_WHITE);
+  else
+    text(st.veh.length() ? st.veh + " " + st.soc + "%" : String("Guest vehicle"), 174, F_MED, C_WHITE);
+  if (st.fin.length()) text(String(st.limit) + unit() + " at " + st.fin, 196, F_SMALL, C_GREY);
 }
+
+const int LIST_TOP = 62, LIST_HEIGHT = 116; // picker entries are drawn only between the arrows
 
 // arrows above and below a picker list when entries are hidden there
 void listArrows(int count) {
@@ -269,13 +303,17 @@ void listArrows(int count) {
 }
 
 void drawMode() {
-  for (int i = 0; i < MODE_COUNT; i++) {
-    arc(135 + i * 56, 181 + i * 56, i == edit ? C_GREEN : C_SEG, true);
-    int y = 120 + (i - edit) * 38;
+  int list[MODE_COUNT], count = modeList(list);
+  float step = 270.0f / count;
+  for (int i = 0; i < count; i++) {
+    arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
+    int y = 120 + (i - scrollPos) * 38;
     if (y < 45 || y > 195) continue;
-    modeLabel(i, y, i == edit, i == edit ? C_GREEN : C_GREY);
+    cv.setClipRect(0, LIST_TOP, 240, LIST_HEIGHT); // keep sliding entries off the arrows
+    modeLabel(list[i], y, i == edit, i == edit ? C_GREEN : C_GREY);
+    cv.clearClipRect();
   }
-  listArrows(MODE_COUNT);
+  listArrows(count);
 }
 
 void drawLoadpoints() {
@@ -283,12 +321,14 @@ void drawLoadpoints() {
   float step = 270.0f / st.lpCount;
   for (int i = 0; i < st.lpCount; i++) {
     arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
-    int y = 120 + (i - edit) * 38;
+    int y = 120 + (i - scrollPos) * 38;
     if (y < 45 || y > 195) continue;
     // long titles do not fit the large font
     cv.setFont(F_LARGE);
     bool large = i == edit && cv.textWidth(st.lps[i].c_str()) < 190;
+    cv.setClipRect(0, LIST_TOP, 240, LIST_HEIGHT);
     text(st.lps[i], y, large ? F_LARGE : F_MED, i == edit ? C_GREEN : C_GREY);
+    cv.clearClipRect();
   }
 }
 
@@ -300,8 +340,8 @@ void drawLimit() {
 
   text("Limit", 66, F_SMALL, C_GREY);
   text(String(edit), 116, F_HUGE, C_WHITE);
-  text("%", 148, F_SMALL, C_GREY);
-  text(String(st.soc) + "% now", 176, F_MED, C_WHITE);
+  text(unit(), 148, F_SMALL, C_GREY);
+  text(String(st.soc) + unit() + " now", 176, F_MED, C_WHITE);
 }
 
 void row(const char *label, const String &value, int y) {
@@ -389,12 +429,16 @@ void showToast(const String &line1, const String &line2) {
 
 void onRotate(int steps) {
   if (!st.ok) return;
+  int list[MODE_COUNT], count = modeList(list);
   if (view == HOME) {
     view = MODE;
-    edit = st.mode;
+    edit = 0;
+    for (int i = 0; i < count; i++)
+      if (list[i] == st.mode) edit = i;
+    scrollPos = edit;
   }
   if (view == MODE)
-    edit = constrain(edit + steps, 0, MODE_COUNT - 1);
+    edit = constrain(edit + steps, 0, count - 1);
   else if (view == LIMIT)
     edit = constrain(edit + steps * 5, 20, 100);
   else if (view == LOADPOINTS)
@@ -408,12 +452,16 @@ void onRotate(int steps) {
 void onPress() {
   if (!st.ok) return;
   switch (view) {
-    case MODE:
-      post(String("/mode/") + MODES[edit].mode);
-      if (MODES[edit].always) post(String("/alwayscharge/") + MODES[edit].always);
-      st.mode = edit; // shown at once, the next poll confirms or reverts it
+    case MODE: {
+      int list[MODE_COUNT];
+      modeList(list);
+      const Mode &m = MODES[list[edit]];
+      post(String("/mode/") + m.mode);
+      if (m.always) post(String("/alwayscharge/") + m.always);
+      st.mode = list[edit]; // shown at once, the next poll confirms or reverts it
       view = page;
       break;
+    }
     case LIMIT:
       post(String("/limitsoc/") + edit);
       st.limit = edit;
@@ -436,11 +484,11 @@ void onPress() {
   M5Dial.Speaker.tone(8000, 20);
 }
 
-// long press on a page opens the loadpoint picker
+// long press on home opens the loadpoint picker
 void onHold() {
-  if (!st.ok || view >= PAGES) return;
+  if (!st.ok || view != HOME) return;
   view = LOADPOINTS;
-  edit = loadpoint - 1;
+  scrollPos = edit = loadpoint - 1;
   overlayAt = millis();
   M5Dial.Speaker.tone(4000, 40);
 }
@@ -519,6 +567,16 @@ void loop() {
   if (postFailed) {
     postFailed = false;
     showToast("Failed", "not set");
+  }
+
+  // picker lists slide to the selected entry instead of jumping
+  static uint32_t lastFrame = 0;
+  uint32_t dt = min((uint32_t)(millis() - lastFrame), (uint32_t)100);
+  lastFrame = millis();
+  if ((view == MODE || view == LOADPOINTS) && scrollPos != edit) {
+    float rest = edit - scrollPos;
+    scrollPos = fabsf(rest) < 0.02f ? edit : scrollPos + rest * (1 - expf(-(float)dt / 60));
+    dirty = true;
   }
 
   if (dirty || view != before || edit != editBefore) {

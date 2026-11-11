@@ -5,14 +5,7 @@ One dial controls one loadpoint: it shows the charging state and sets mode, limi
 
 Status: compiles, not yet tested on hardware.
 
-<p>
-  <img src="docs/main.png" width="240" alt="Home: charge power, mode and vehicle SoC">
-  <img src="docs/mode.png" width="240" alt="Rotate: pick the charge mode">
-  <img src="docs/limit.png" width="240" alt="Press, then rotate: set the SoC limit">
-  <img src="docs/flow.png" width="240" alt="Swipe: energy flow">
-  <img src="docs/plan.png" width="240" alt="Swipe: plan and 24 h price ring">
-  <img src="docs/rfid.png" width="240" alt="RFID tag: vehicle assigned">
-</p>
+![Design of the six screens: home, mode, limit, energy flow, plan, RFID](docs/screens.svg)
 
 The image is the design. The firmware uses built-in fonts and simpler shapes.
 
@@ -24,7 +17,7 @@ The image is the design. The firmware uses built-in fonts and simpler shapes.
 | Press (on home) | Edit the SoC limit in 5% steps. Press to set. |
 | Swipe left/right | Switch page: home, energy flow, plan. |
 | Press (other pages) | Back to home. |
-| Long press | Pick the loadpoint. Rotate, press to select. The choice is saved. |
+| Long press (home) | Pick the loadpoint. Rotate, press to select. The choice is saved. |
 | RFID tag | Assign the mapped vehicle to the loadpoint. |
 
 Nothing changes without a press. Mode and limit editors close after 5 s.

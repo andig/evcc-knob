@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import ImageFont
 
-ASCII = "".join(chr(c) for c in range(0x21, 0x7F))
+ASCII = "".join(chr(c) for c in range(0x21, 0x7F)) + "°"
 # name, weight, pixel size, characters
 FONTS = [
     ("SMALL", "Medium", 14, ASCII),

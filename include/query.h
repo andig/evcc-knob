@@ -12,6 +12,8 @@ def hm: if . == null then null else strflocaltime("%H:%M") end;
 | {
   min: (now | localtime | .[3] * 60 + .[4]),
   lp: $l.title, mode: $l.mode, cp: $l.chargePower, soc: $l.vehicleSoc,
+  cont: $l.chargerFeatureContinuous, sw: $l.chargerFeatureSwitchDevice,
+  heat: $l.chargerFeatureHeating, dev: $l.chargerFeatureIntegratedDevice,
   ac: $l.alwaysCharge, lim: $l.effectiveLimitSoc, con: $l.connected, veh: $l.vehicleTitle,
   fin: (if ($l.chargeRemainingDuration // 0) > 0 then now + $l.chargeRemainingDuration | hm else null end),
   pt: ($l.effectivePlanTime | ep | hm), psoc: $l.effectivePlanSoc,

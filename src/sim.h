@@ -37,10 +37,13 @@ struct String : std::string {
   String operator+(const char *o) const { return *this + String(o); }
 };
 
-// settings are not kept between simulator runs
+// settings are not kept between simulator runs; SIM_LP=n starts on loadpoint n
 struct Preferences {
   void begin(const char *) {}
-  int getInt(const char *, int fallback) { return fallback; }
+  int getInt(const char *, int fallback) {
+    const char *lp = getenv("SIM_LP");
+    return lp ? atoi(lp) : fallback;
+  }
   void putInt(const char *, int) {}
 };
 
