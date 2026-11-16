@@ -473,6 +473,24 @@ String urlencode(const String &s) {
   return out;
 }
 
+// one kept-alive connection for all requests, used only by postTask: a new TLS handshake
+// per request took ~5 s and fragmented the heap until handshakes failed (http -1)
+HTTPClient &api(const String &url) {
+  static WiFiClient plain;
+  static WiFiClientSecure secure;
+  static HTTPClient http;
+  static bool tls = !strncmp(EVCC_URL, "https", 5);
+  secure.setInsecure(); // shortcut: no certificate check, add a CA if evcc is not on the LAN
+#ifdef ARDUINO
+  secure.setHandshakeTimeout(5); // seconds; the default 120 s stalled all polls on weak WiFi
+#endif
+  http.setReuse(true);
+  http.setConnectTimeout(3000);
+  http.setTimeout(3000);
+  http.begin(tls ? (WiFiClient &)secure : plain, url);
+  return http;
+}
+
 String lastBody; // last poll's response: an identical one changes nothing on screen
 
 // whole state of the current loadpoint in one request, shrunk by evcc's jq;
@@ -484,9 +502,7 @@ State poll(bool &changed) {
   State next;
   next.loadpoint = loadpoint;
   if (!WiFi.isConnected()) return next;
-  HTTPClient http;
-  http.setTimeout(3000);
-  http.begin(base + (next.loadpoint - 1) + query);
+  HTTPClient &http = api(base + (next.loadpoint - 1) + query);
   JsonDocument doc;
   int code = http.GET();
   String body = code == HTTP_CODE_OK ? String(http.getString().c_str()) : String();
@@ -560,9 +576,7 @@ void postTask(void *) {
   for (;;) {
     // a queued POST wakes the task early and is followed by a fresh poll
     if (xQueueReceive(posts, path, pdMS_TO_TICKS(WEBSOCKET ? 1000 : 3000)) && path[0]) {
-      HTTPClient http;
-      http.setTimeout(3000);
-      http.begin(String(EVCC_URL) + path);
+      HTTPClient &http = api(String(EVCC_URL) + path);
       if (http.POST("") != HTTP_CODE_OK) postFailed = true;
       http.end();
       lastBody = String(); // the next poll confirms or reverts what the UI already shows

@@ -100,7 +100,7 @@ struct Client {
   }
 };
 struct WiFiClient : Client {};
-struct WiFiClientSecure : Client {
+struct WiFiClientSecure : WiFiClient { // as on the device, where it derives from WiFiClient
   WiFiClientSecure() { tls = true; }
   void setInsecure() {}
 };
@@ -111,6 +111,9 @@ struct HTTPClient {
 
   void setTimeout(long ms) { timeout = ms; }
   void begin(const String &u) { url = u; }
+  void begin(Client &, const String &u) { url = u; }
+  void setReuse(bool) {}
+  void setConnectTimeout(long) {}
   void end() {}
   std::string getString() { return body; }
   int GET() { return request(false); }
