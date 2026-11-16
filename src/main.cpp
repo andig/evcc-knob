@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
+#include <ESP32Encoder.h>
 #else
 #include "sim.h"
 #endif
@@ -889,9 +890,24 @@ void onRfid() {
   showToast("Unknown tag", uid, "Not assigned", "", true);
 }
 
+#ifdef ARDUINO
+ESP32Encoder enc;
+long encRead() { return enc.getCount(); }
+#else
+long encRead() { return M5Dial.Encoder.read(); }
+#endif
+
 void setup() {
   auto cfg = M5.config();
+#ifdef ARDUINO
+  // the M5Dial encoder library counts in interrupts and misses edges when the contacts
+  // bounce; the PCNT hardware counter with its glitch filter does not
+  M5Dial.begin(cfg, false, true); // RFID
+  enc.attachFullQuad(DIAL_ENCODER_PIN_A, DIAL_ENCODER_PIN_B);
+  enc.setFilter(1023);
+#else
   M5Dial.begin(cfg, true, true); // encoder, RFID
+#endif
   cv.createSprite(240, 240);
   loadFonts();
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -904,7 +920,7 @@ void setup() {
 #endif
   xTaskCreate(socketTask, "socket", 12288, nullptr, 1, nullptr);
   xTaskCreate(postTask, "post", 8192, nullptr, 1, nullptr);
-  lastEnc = M5Dial.Encoder.read();
+  lastEnc = encRead();
 #ifndef ARDUINO
   if (const char *p = getenv("SIM_PAGE")) view = page = (View)atoi(p); // screenshots of other pages
 #endif
@@ -915,8 +931,12 @@ void loop() {
   View before = view;
   int editBefore = edit;
 
-  long enc = M5Dial.Encoder.read();
-  if (int steps = (enc - lastEnc) / ENC_STEP) {
+  long enc = encRead();
+  // step past half a detent: truncating drops a click in one direction once a lost count
+  // shifts the rest position; exactly half would flip back and forth at rest
+  int moved = enc - lastEnc, slack = (ENC_STEP - 1) / 2;
+  int steps = (moved + (moved > 0 ? slack : -slack)) / ENC_STEP;
+  if (steps) {
     lastEnc += steps * ENC_STEP;
     onRotate(steps);
   }
