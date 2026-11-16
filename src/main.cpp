@@ -601,8 +601,39 @@ void line(int y, std::initializer_list<Run> runs, int gap = 4) {
 }
 
 // anti-aliased ring segment, degrees clockwise from 3 o'clock, optionally with round ends
+const float R0 = 106, R1 = 116, RI = R0 - 1, RO = R1 + 1; // ring edges, and with AA margin
+
+// angle and centre distance of the ring's pixels, built once so arc() needs no sqrtf or
+// atan2f per pixel. Only one quadrant is stored, the others are its mirror images: the full
+// ring took 25 kB, and without that RAM the TLS handshake to evcc failed.
+// Fixed arrays, not vectors: growing a vector needs one large free block (bad_alloc, abort).
+const int RING_N = 118;          // |dx|, |dy| <= RO
+const int RING_PIXELS = 2106;    // quadrant pixels with RI <= distance <= RO
+struct Ring {
+  uint16_t first[RING_N];        // index of row |dy|'s first pixel
+  uint8_t start[RING_N], len[RING_N]; // one run of |dx| per row
+  uint16_t ang[RING_PIXELS];     // quadrant angle 0..90 degrees scaled to 0..65535
+  uint8_t dist[RING_PIXELS];     // (distance - 104) * 16
+  Ring() {
+    int n = 0;
+    for (int y = 0; y < RING_N; y++) {
+      first[y] = n;
+      start[y] = len[y] = 0;
+      for (int x = 0; x < RING_N; x++) {
+        float d2 = x * x + y * y;
+        if (d2 < RI * RI || d2 > RO * RO || n == RING_PIXELS) continue;
+        if (!len[y]) start[y] = x;
+        len[y]++;
+        ang[n] = atan2f(y, x) / DEG_TO_RAD * 65535 / 90;
+        dist[n++] = lroundf((sqrtf(d2) - 104) * 16);
+      }
+    }
+  }
+};
+
 void arc(float from, float to, uint32_t color, bool round = false) {
-  const float R0 = 106, R1 = 116, CAP = 5;
+  static Ring ring;
+  const float CAP = 5;
   float span = to - from;
   if (span <= 0) return;
   float capX[2], capY[2];
@@ -629,39 +660,40 @@ void arc(float from, float to, uint32_t color, bool round = false) {
   int xa = max(0, (int)bx0 - PAD), xb = min(239, (int)bx1 + PAD);
   int ya = max(0, (int)by0 - PAD), yb = min(239, (int)by1 + PAD);
 
-  const float RI = R0 - 1, RO = R1 + 1;
   cv.startWrite();
   for (int y = ya; y <= yb; y++) {
-    float dy = y - 120;
-    if (fabsf(dy) > RO) continue;
-    // only the ring's own pixels on this row: skip outside it and its hollow centre
-    int xo = sqrtf(RO * RO - dy * dy) + 1;
-    int xi = fabsf(dy) < RI ? (int)sqrtf(RI * RI - dy * dy) : 0;
-    for (int x = max(120 - xo, xa); x <= min(120 + xo, xb); x++) {
-      if (x > 120 - xi && x < 120 + xi) {
-        x = 120 + xi - 1;
-        continue;
+    int dy = y - 120, ady = abs(dy);
+    if (ady >= RING_N || !ring.len[ady]) continue;
+    int s = ring.start[ady], e = s + ring.len[ady] - 1;
+    // right half (dx >= 0), then left half (dx < 0, so dx = 0 is drawn once)
+    for (int side = 1; side >= -1; side -= 2) {
+      int lo = side > 0 ? max(s, xa - 120) : max(max(s, 1), 120 - xb);
+      int hi = side > 0 ? min(e, xb - 120) : min(e, 120 - xa);
+      for (int adx = lo; adx <= hi; adx++) {
+        int i = ring.first[ady] + adx - s, x = 120 + side * adx;
+        float dx = side * adx, d = ring.dist[i] / 16.0f + 104;
+        // coverage: distance in pixels to the nearest edge, 0.5 on the edge itself
+        float a = min(d - R0, R1 - d) + 0.5f;
+        if (span < 360) {
+          // mirror the quadrant angle into the pixel's quadrant, screen y points down
+          float q = ring.ang[i] * (90.0f / 65535);
+          float deg = side > 0 ? (dy >= 0 ? q : 360 - q) : (dy >= 0 ? 180 - q : 180 + q);
+          float t = deg - from;
+          t -= 360 * floorf(t / 360);
+          float along = t <= span ? min(t, span - t) : -min(t - span, 360 - t);
+          a = min(a, along * (float)DEG_TO_RAD * d + 0.5f);
+          for (int c = 0; round && c < 2; c++)
+            a = max(a, min(CAP + 0.5f - hypotf(dx - capX[c], dy - capY[c]), 1.0f));
+        }
+        if (a <= 0) continue;
+        if (a >= 1) {
+          cv.writePixel(x, y, color);
+          continue;
+        }
+        auto bg = cv.readPixelRGB(x, y);
+        cv.writePixel(x, y, lgfx::color888(bg.r + (r - bg.r) * a, bg.g + (g - bg.g) * a,
+                                           bg.b + (b - bg.b) * a));
       }
-      float dx = x - 120, d2 = dx * dx + dy * dy;
-      if (d2 < RI * RI || d2 > RO * RO) continue;
-      // coverage: distance in pixels to the nearest edge, 0.5 on the edge itself
-      float d = sqrtf(d2), a = min(d - R0, R1 - d) + 0.5f;
-      if (span < 360) {
-        float t = fmodf(atan2f(dy, dx) / DEG_TO_RAD - from, 360);
-        if (t < 0) t += 360;
-        float along = t <= span ? min(t, span - t) : -min(t - span, 360 - t);
-        a = min(a, along * (float)DEG_TO_RAD * d + 0.5f);
-        for (int i = 0; round && i < 2; i++)
-          a = max(a, min(CAP + 0.5f - hypotf(dx - capX[i], dy - capY[i]), 1.0f));
-      }
-      if (a <= 0) continue;
-      if (a >= 1) {
-        cv.writePixel(x, y, color);
-        continue;
-      }
-      auto bg = cv.readPixelRGB(x, y);
-      cv.writePixel(x, y, lgfx::color888(bg.r + (r - bg.r) * a, bg.g + (g - bg.g) * a,
-                                         bg.b + (b - bg.b) * a));
     }
   }
   cv.endWrite();
