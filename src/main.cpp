@@ -671,6 +671,13 @@ void arc(float from, float to, uint32_t color, bool round = false, bool erase = 
     capY[i] = (R0 + R1) / 2 * sinf(rad);
   }
   int r = color >> 16 & 0xFF, g = color >> 8 & 0xFF, b = color & 0xFF;
+  // pixels go straight into the sprite's buffer, as byte-swapped RGB565: writePixel() costs
+  // a clip check and a dispatch per pixel, most of the time this function took
+  auto *fb = (uint16_t *)cv.getBuffer();
+  auto px = [](int r, int g, int b) { return __builtin_bswap16(lgfx::color565(r, g, b)); };
+  uint16_t full = px(r, g, b), bg = px(C_BG >> 16, C_BG >> 8 & 0xFF, C_BG & 0xFF);
+  float start = fmodf(from, 360); // 0..360, so one turn corrects any pixel angle below
+  if (start < 0) start += 360;
 
   // scan only the segment's bounding box: its ends and the axis crossings between them
   float bx0 = 240, bx1 = 0, by0 = 240, by1 = 0;
@@ -688,7 +695,6 @@ void arc(float from, float to, uint32_t color, bool round = false, bool erase = 
   int xa = max(0, (int)bx0 - PAD), xb = min(239, (int)bx1 + PAD);
   int ya = max(0, (int)by0 - PAD), yb = min(239, (int)by1 + PAD);
 
-  cv.startWrite();
   for (int y = ya; y <= yb; y++) {
     int dy = y - 120, ady = abs(dy);
     if (ady >= RING_N || !ring.len[ady]) continue;
@@ -706,29 +712,33 @@ void arc(float from, float to, uint32_t color, bool round = false, bool erase = 
           // mirror the quadrant angle into the pixel's quadrant, screen y points down
           float q = ring.ang[i] * (90.0f / 65535);
           float deg = side > 0 ? (dy >= 0 ? q : 360 - q) : (dy >= 0 ? 180 - q : 180 + q);
-          float t = deg - from;
-          t -= 360 * floorf(t / 360);
+          float t = deg - start;
+          if (t < 0) t += 360;
           float along = t <= span ? min(t, span - t) : -min(t - span, 360 - t);
-          a = min(a, along * (float)DEG_TO_RAD * d + 0.5f);
-          for (int c = 0; round && c < 2; c++)
-            a = max(a, min(CAP + 0.5f - hypotf(dx - capX[c], dy - capY[c]), 1.0f));
+          float end = along * (float)DEG_TO_RAD * d; // distance to the nearest end, in pixels
+          a = min(a, end + 0.5f);
+          // a round end reaches about CAP pixels around the end, skip its math farther away
+          for (int c = 0; round && fabsf(end) < CAP + 2 && c < 2; c++) {
+            float cx = dx - capX[c], cy = dy - capY[c], q2 = cx * cx + cy * cy;
+            if (q2 < (CAP + 0.5f) * (CAP + 0.5f)) a = max(a, min(CAP + 0.5f - sqrtf(q2), 1.0f));
+          }
         }
         if (a <= 0) continue;
         if (erase) {
-          cv.writePixel(x, y, C_BG);
+          fb[y * 240 + x] = bg;
           continue;
         }
         if (a >= 1) {
-          cv.writePixel(x, y, color);
+          fb[y * 240 + x] = full;
           continue;
         }
-        auto bg = cv.readPixelRGB(x, y);
-        cv.writePixel(x, y, lgfx::color888(bg.r + (r - bg.r) * a, bg.g + (g - bg.g) * a,
-                                           bg.b + (b - bg.b) * a));
+        // blend over the pixel already there
+        uint16_t c = __builtin_bswap16(fb[y * 240 + x]);
+        int pr = c >> 8 & 0xF8, pg = c >> 3 & 0xFC, pb = c << 3 & 0xF8;
+        fb[y * 240 + x] = px(pr + (r - pr) * a, pg + (g - pg) * a, pb + (b - pb) * a);
       }
     }
   }
-  cv.endWrite();
 }
 
 void dot(float angle, int radius, int size, uint32_t color) {
