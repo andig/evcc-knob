@@ -21,16 +21,17 @@ def hm: if . == null then null else strflocaltime("%H:%M") end;
   pt: ($l.effectivePlanTime | ep | hm), psoc: $l.effectivePlanSoc, pen: $l.planEnergy,
   sbp: ((($l.vehicleName // "") != "" and (($v.features // []) | index("Offline") | not)
     or ($l.vehicleSoc // 0) > 0) and ($v.capacity // 0) > 0),
-  ps: ($ps | hm), pe: ($pe | hm),
+  ps: ($ps | hm), pe: ($pe | hm), psx: $ps, pex: $pe,
   pv: .pvPower, grid: .grid.power, home: .homePower,
   bat: .battery.power, bsoc: .battery.soc,
-  price: .tariffGrid, lps: [.loadpoints[].title],
-  fc: ([(.forecast.grid // [])[] | select(.[1] > now)]
-    | group_by(.[0] / 3600 | floor) | .[0:24]
-    | map((.[0][0] / 3600 | floor * 3600) as $h | [
-        ($h | localtime | .[3]),
-        (map(.[2]) | add / length),
-        (if $ps != null and $pe != null and $h + 3600 > $ps and $h < $pe then 1 else 0 end)
-      ]))
+  price: .tariffGrid, lps: [.loadpoints[].title]
 }
+)jq";
+
+// grid price forecast, fetched only every few minutes: the next 24 hours as
+// [local hour, average price, hour start in epoch seconds]
+static const char FORECAST[] = R"jq(
+[(.forecast.grid // [])[] | select(.[1] > now)]
+| group_by(.[0] / 3600 | floor) | .[0:24]
+| map((.[0][0] / 3600 | floor * 3600) as $h | [($h | localtime | .[3]), (map(.[2]) | add / length), $h])
 )jq";

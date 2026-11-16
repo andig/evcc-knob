@@ -497,6 +497,32 @@ HTTPClient &api(const String &url) {
 
 String lastBody; // last poll's response: an identical one changes nothing on screen
 
+// grid price forecast, fetched apart from the poll: it changes at most hourly
+struct Hour {
+  uint8_t hour;
+  float price;
+  uint32_t start; // epoch seconds
+} hours[24];
+int hourCount = 0;
+
+bool fetchForecast() {
+  static const String url = String(EVCC_URL) + "/api/state?jq=" + urlencode(FORECAST);
+  HTTPClient &http = api(url);
+  int code = http.GET();
+  String body = code == HTTP_CODE_OK ? String(http.getString().c_str()) : String();
+  http.end();
+  JsonDocument doc;
+  bool ok = code == HTTP_CODE_OK && !deserializeJson(doc, body.c_str());
+  LOG("%lu forecast http %d\n", (unsigned long)millis(), code);
+  if (!ok) return false;
+  hourCount = 0;
+  for (JsonArray h : doc.as<JsonArray>()) {
+    if (hourCount == 24) break;
+    hours[hourCount++] = {h[0].as<uint8_t>(), h[1].as<float>(), h[2].as<uint32_t>()};
+  }
+  return true;
+}
+
 // whole state of the current loadpoint in one request, shrunk by evcc's jq;
 // changed is false when evcc returned exactly the previous response
 State poll(bool &changed) {
@@ -551,9 +577,11 @@ State poll(bool &changed) {
     if (!strcmp(mode, MODES[i].mode) && (!MODES[i].always || !strcmp(always, MODES[i].always)))
       next.mode = i;
 
-  for (JsonArray s : doc["fc"].as<JsonArray>()) {
-    if (next.slots == 24) break;
-    next.fc[next.slots++] = {s[0].as<uint8_t>(), s[1].as<float>(), s[2].as<int>() == 1};
+  // prices from the last forecast, plan window from this poll
+  uint32_t from = doc["psx"] | 0u, to = doc["pex"] | 0u;
+  for (int i = 0; i < hourCount; i++) {
+    const Hour &h = hours[i];
+    next.fc[next.slots++] = {h.hour, h.price, from && to && h.start + 3600 > from && h.start < to};
   }
   for (JsonVariant title : doc["lps"].as<JsonArray>()) {
     if (next.lpCount == 8) break;
@@ -587,6 +615,15 @@ void postTask(void *) {
       if (!uxQueueMessagesWaiting(posts)) posting = false;
     }
 #if !WEBSOCKET
+    // forecast every 5 min, retried with the next poll until it once succeeded
+    static uint32_t forecastAt = 0;
+    static bool forecast = false;
+    if (WiFi.isConnected() && (!forecast || millis() - forecastAt > 5 * 60 * 1000) &&
+        fetchForecast()) {
+      forecast = true;
+      forecastAt = millis();
+      lastBody = String(); // new prices: hand the next poll over even if it is unchanged
+    }
     uint32_t t = millis();
     bool changed;
     State next = poll(changed);
