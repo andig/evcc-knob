@@ -1029,6 +1029,10 @@ void onPress() {
     case MODE: {
       int list[MODE_COUNT];
       modeList(list);
+      if (list[edit] == st.mode) { // unchanged: nothing to send
+        view = page;
+        break;
+      }
       const Mode &m = MODES[list[edit]];
       posting = holding = true; // before queueing: postTask may finish first
       post(String("/mode/") + m.mode);
@@ -1182,8 +1186,11 @@ void loop() {
     if (view == MODE) view = page;
   }
   if (switching || holding) overlayAt = millis();
-  // overlays close on their own: nothing is changed without a press
-  if (view >= PAGES && millis() - overlayAt > (view == TOAST ? 3000 : 5000)) view = page;
+  // overlays close on their own; a picker left alone takes its current entry, as if pressed
+  if (view >= PAGES && millis() - overlayAt > (view == TOAST ? 3000 : 5000)) {
+    if (view == MODE || view == LOADPOINTS) onPress();
+    if (!switching && !holding) view = page; // still open unless a change is in flight
+  }
 
   if (fresh) {
     xSemaphoreTake(lock, portMAX_DELAY);

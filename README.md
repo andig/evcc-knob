@@ -20,7 +20,8 @@ The image is the design. The firmware uses built-in fonts and simpler shapes.
 | Long press (home) | Pick the loadpoint. Rotate, press to select. The choice is saved. |
 | RFID tag | Assign the mapped vehicle to the loadpoint. |
 
-Nothing changes without a press. Mode and limit editors close after 5 s.
+The limit editor closes after 5 s without a change. The mode and loadpoint pickers take
+their current entry after 5 s, as if pressed; an unchanged entry sends nothing.
 
 ## Pages
 
