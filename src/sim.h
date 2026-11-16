@@ -174,6 +174,10 @@ inline bool xQueueReceive(QueueHandle_t q, void *out, int ms) {
   q->items.pop_front();
   return true;
 }
+inline int uxQueueMessagesWaiting(QueueHandle_t q) {
+  std::lock_guard<std::mutex> l(q->m);
+  return q->items.size();
+}
 inline void xTaskCreate(void (*fn)(void *), const char *, int, void *arg, int, void *) {
   std::thread(fn, arg).detach();
 }

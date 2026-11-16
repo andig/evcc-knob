@@ -100,12 +100,14 @@ SemaphoreHandle_t lock;
 QueueHandle_t posts;
 State pending;
 volatile bool fresh = false, postFailed = false;
+volatile bool posting = false; // queued POSTs not done yet, cleared by postTask
 long lastEnc = 0;
 String toast[4];
 bool toastCard = false;
 bool dirty = true;
 bool settled = true; // picker labels are drawn only once the dial rests, the arc at once
 bool switching = false; // loadpoint picked, its first data not here yet
+bool holding = false;   // mode picked, the picker shows only it until the POST returned
 
 // ---------- evcc API ----------
 
@@ -567,7 +569,7 @@ State poll(bool &changed) {
 void post(const String &path) {
   char buf[48];
   strlcpy(buf, (String("/api/loadpoints/") + loadpoint + path).c_str(), sizeof(buf));
-  xQueueSend(posts, buf, 0);
+  if (!xQueueSend(posts, buf, 0)) postFailed = true, posting = false; // queue full: not sent
 }
 
 // POSTs (and without websocket the polls) run here, so the UI loop never waits for the network
@@ -580,6 +582,7 @@ void postTask(void *) {
       if (http.POST("") != HTTP_CODE_OK) postFailed = true;
       http.end();
       lastBody = String(); // the next poll confirms or reverts what the UI already shows
+      if (!uxQueueMessagesWaiting(posts)) posting = false;
     }
 #if !WEBSOCKET
     uint32_t t = millis();
@@ -821,12 +824,12 @@ void drawMode() {
   for (int i = 0; i < count; i++) {
     segment(i, count, i == edit ? C_GREEN : C_SEG);
     int y = 120 + (i - edit) * 38;
-    if (!settled || y < 45 || y > 195) continue;
+    if (!settled || y < 45 || y > 195 || (holding && i != edit)) continue;
     cv.setClipRect(0, LIST_TOP, 240, LIST_HEIGHT); // keep entries off the arrows
     modeLabel(list[i], y, i == edit, i == edit ? C_GREEN : C_GREY);
     cv.clearClipRect();
   }
-  if (settled) listArrows(count);
+  if (settled && !holding) listArrows(count);
 }
 
 void drawLoadpoints() {
@@ -984,8 +987,9 @@ void showToast(const String &label, const String &title, const String &green,
 }
 
 void onRotate(int steps) {
-  if (!st.ok || switching) {
-    LOG("%lu rotate ignored ok=%d switching=%d\n", (unsigned long)millis(), st.ok, switching);
+  if (!st.ok || switching || holding) {
+    LOG("%lu rotate ignored ok=%d switching=%d holding=%d\n", (unsigned long)millis(), st.ok,
+        switching, holding);
     return;
   }
   int list[MODE_COUNT], count = modeList(list);
@@ -1008,16 +1012,17 @@ void onRotate(int steps) {
 }
 
 void onPress() {
-  if (!st.ok || switching) return;
+  if (!st.ok || switching || holding) return;
   switch (view) {
     case MODE: {
       int list[MODE_COUNT];
       modeList(list);
       const Mode &m = MODES[list[edit]];
+      posting = holding = true; // before queueing: postTask may finish first
       post(String("/mode/") + m.mode);
       if (m.always) post(String("/alwayscharge/") + m.always);
       st.mode = list[edit]; // shown at once, the next poll confirms or reverts it
-      view = page;
+      dirty = true;         // the picker shows only this mode until the POST returned
       break;
     }
     case LIMIT:
@@ -1160,7 +1165,11 @@ void loop() {
 
   if (M5Dial.Rfid.PICC_IsNewCardPresent() && M5Dial.Rfid.PICC_ReadCardSerial()) onRfid();
 
-  if (switching) overlayAt = millis();
+  if (holding && !posting) {
+    holding = false;
+    if (view == MODE) view = page;
+  }
+  if (switching || holding) overlayAt = millis();
   // overlays close on their own: nothing is changed without a press
   if (view >= PAGES && millis() - overlayAt > (view == TOAST ? 3000 : 5000)) view = page;
 
@@ -1189,8 +1198,9 @@ void loop() {
     showToast("", "Failed", "Not set");
   }
 
-  // switching keeps overlayAt fresh to hold the picker open, but the dial rests
-  bool rest = switching || (view != MODE && view != LOADPOINTS) || millis() - overlayAt > 150;
+  // switching and holding keep overlayAt fresh to hold the picker open, but the dial rests
+  bool rest = switching || holding || (view != MODE && view != LOADPOINTS) ||
+              millis() - overlayAt > 150;
   if (rest != settled) {
     settled = rest;
     dirty = true;
