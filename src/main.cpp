@@ -1187,7 +1187,7 @@ void loop() {
   }
   if (switching || holding) overlayAt = millis();
   // overlays close on their own; a picker left alone takes its current entry, as if pressed
-  if (view >= PAGES && millis() - overlayAt > (view == TOAST ? 3000 : 5000)) {
+  if (view >= PAGES && millis() - overlayAt > 3000) {
     if (view == MODE || view == LOADPOINTS) onPress();
     if (!switching && !holding) view = page; // still open unless a change is in flight
   }
