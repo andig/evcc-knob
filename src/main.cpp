@@ -473,8 +473,12 @@ String urlencode(const String &s) {
   return out;
 }
 
-// whole state of the current loadpoint in one request, shrunk by evcc's jq
-State poll() {
+String lastBody; // last poll's response: an identical one changes nothing on screen
+
+// whole state of the current loadpoint in one request, shrunk by evcc's jq;
+// changed is false when evcc returned exactly the previous response
+State poll(bool &changed) {
+  changed = true;
   static const String base = String(EVCC_URL) + "/api/state?jq=",
                       query = urlencode(String(" as $i|") + QUERY);
   State next;
@@ -485,7 +489,10 @@ State poll() {
   http.begin(base + (next.loadpoint - 1) + query);
   JsonDocument doc;
   int code = http.GET();
-  bool ok = code == HTTP_CODE_OK && !deserializeJson(doc, http.getString());
+  String body = code == HTTP_CODE_OK ? String(http.getString().c_str()) : String();
+  bool ok = code == HTTP_CODE_OK && !deserializeJson(doc, body.c_str());
+  changed = !ok || body != lastBody;
+  lastBody = ok ? body : String();
   LOG("%lu http %d rssi=%d\n", (unsigned long)millis(), code, (int)RSSI);
   http.end();
   next.ok = ok;
@@ -558,13 +565,15 @@ void postTask(void *) {
       http.begin(String(EVCC_URL) + path);
       if (http.POST("") != HTTP_CODE_OK) postFailed = true;
       http.end();
+      lastBody = String(); // the next poll confirms or reverts what the UI already shows
     }
 #if !WEBSOCKET
     uint32_t t = millis();
-    State next = poll();
-    LOG("%lu poll ok=%d %lums heap=%lu\n", (unsigned long)t, next.ok, (unsigned long)(millis() - t),
-        (unsigned long)HEAP);
-    handover(next);
+    bool changed;
+    State next = poll(changed);
+    LOG("%lu poll ok=%d changed=%d %lums heap=%lu\n", (unsigned long)t, next.ok, changed,
+        (unsigned long)(millis() - t), (unsigned long)HEAP);
+    if (changed) handover(next);
 #endif
   }
 }
