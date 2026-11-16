@@ -1,4 +1,4 @@
-// Desktop simulator: stands in for M5Dial, WiFi, HTTPClient and FreeRTOS on a PC.
+// Desktop simulator: stands in for M5Dial, WiFi, HTTP, sockets and FreeRTOS on a PC.
 // Display, touch (mouse) and speaker come from M5Unified's SDL backend.
 #pragma once
 
@@ -55,6 +55,55 @@ inline struct {
 } WiFi;
 
 const int HTTP_CODE_OK = 200;
+
+inline void delay(int ms) { SDL_Delay(ms); }
+
+// raw TCP or TLS connection through libcurl, for the websocket
+struct Client {
+  CURL *c = nullptr;
+  bool tls = false, open = false;
+  std::string in;
+
+  bool connect(const char *host, int port) {
+    stop();
+    c = curl_easy_init();
+    std::string url = std::string(tls ? "https://" : "http://") + host + ":" + std::to_string(port);
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_CONNECT_ONLY, 1L);
+    curl_easy_setopt(c, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+    return open = curl_easy_perform(c) == CURLE_OK;
+  }
+  void print(const std::string &s) {
+    size_t n;
+    if (curl_easy_send(c, s.data(), s.size(), &n) != CURLE_OK) open = false;
+  }
+  int available() {
+    char buf[4096];
+    size_t n = 0;
+    CURLcode r = open ? curl_easy_recv(c, buf, sizeof(buf), &n) : CURLE_RECV_ERROR;
+    if (r == CURLE_OK && n) in.append(buf, n);
+    else if (r != CURLE_AGAIN) open = false; // closed by the server, or failed
+    return in.size();
+  }
+  int read(uint8_t *out, size_t len) {
+    size_t n = std::min(len, in.size());
+    memcpy(out, in.data(), n);
+    in.erase(0, n);
+    return n;
+  }
+  bool connected() { return open || !in.empty(); }
+  void stop() {
+    if (c) curl_easy_cleanup(c);
+    c = nullptr;
+    open = false;
+    in.clear();
+  }
+};
+struct WiFiClient : Client {};
+struct WiFiClientSecure : Client {
+  WiFiClientSecure() { tls = true; }
+  void setInsecure() {}
+};
 
 struct HTTPClient {
   std::string url, body;

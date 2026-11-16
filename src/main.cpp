@@ -3,14 +3,18 @@
 #include <M5Dial.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Preferences.h>
 #else
 #include "sim.h"
 #endif
 #include <ArduinoJson.h>
-#include "query.h"
 #include "icons.h"
 #include "fonts.h"
+
+#ifndef TZ
+#define TZ "CET-1CEST,M3.5.0,M10.5.0/3" // POSIX time zone, here Central Europe
+#endif
 
 const uint32_t C_BG = 0x020318, C_TRACK = 0x1C2030, C_SEG = 0x2A2E40, C_GREY = 0x93949E,
                C_DIM = 0x6F7080, C_GREEN = 0x0FDE41, C_DARKGREEN = 0x0B5C26, C_PILL = 0x0B3D1C, C_BATTERY = 0x0BA631, C_EXPORT = 0xFFCC00, C_WHITE = 0xFFFFFF;
@@ -58,7 +62,7 @@ struct State {
   int vehCount = 0;
   String vehNames[8], vehTitles[8]; // evcc vehicle names and their titles
   String lp, veh, fin, planTime, planStart, planEnd;
-  int mode = 0, soc = 0, limit = 0, planSoc = 0, batSoc = 0, minute = 0, slots = 0;
+  int mode = 0, soc = 0, limit = 0, planSoc = 0, batSoc = -1, minute = 0, slots = 0;
   float chargePower = 0, pv = 0, grid = 0, home = 0, bat = 0, price = 0;
   Slot fc[24];
   int loadpoint = 0, lpCount = 0; // loadpoint this state was polled for
@@ -76,7 +80,7 @@ float scrollPos = 0;      // picker list position, eases towards edit
 uint32_t overlayAt = 0;   // last interaction with an overlay
 volatile int loadpoint = LOADPOINT; // 1-based, LOADPOINT is only the first-boot default
 
-// handover from the network task: st itself is only touched by the UI loop
+// handover from the socket task: st itself is only touched by the UI loop
 SemaphoreHandle_t lock;
 QueueHandle_t posts;
 State pending;
@@ -89,110 +93,371 @@ bool switching = false; // loadpoint picked, its first data not here yet
 
 // ---------- evcc API ----------
 
-String urlencode(const String &s) {
-  String out;
-  char buf[4];
-  for (char c : s) {
-    if (isalnum(c)) {
-      out += c;
-    } else {
-      snprintf(buf, sizeof(buf), "%%%02X", (uint8_t)c);
-      out += buf;
+// ISO 8601 time to epoch; 0 if unset (evcc sends year 1 for "no time")
+time_t iso(const char *s) {
+  int y, mo, d, h, mi, se, oh = 0, om = 0;
+  if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6 || y < 1971) return 0;
+  const char *z = s + 19;
+  while (*z && *z != 'Z' && *z != '+' && *z != '-') z++; // skip fractional seconds
+  if (*z == '+' || *z == '-') {
+    sscanf(z + 1, "%d:%d", &oh, &om);
+    if (*z == '-') oh = -oh, om = -om;
+  }
+  // days since 1970 from the civil date (Howard Hinnant's algorithm)
+  y -= mo <= 2;
+  int era = y / 400, yoe = y - era * 400;
+  int doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+  return (time_t)days * 86400 + h * 3600 + mi * 60 + se - oh * 3600 - om * 60;
+}
+
+bool clockSet() { return time(nullptr) > 1600000000; }
+
+// local "HH:MM"; empty if unset or the clock has no NTP time yet
+String hm(time_t t) {
+  if (t <= 0 || !clockSet()) return "";
+  struct tm tm;
+  localtime_r(&t, &tm);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%02d:%02d", tm.tm_hour, tm.tm_min);
+  return buf;
+}
+
+// values kept between socket messages that the screens only show in derived form
+struct Raw {
+  String mode = "off", always = "off", vehicle; // vehicle: evcc name of the connected one
+  float remaining = 0;                          // seconds of charging left
+  time_t planAt = 0, planFrom = 0, planTo = 0;
+  float vehCap[8] = {};
+  bool vehOffline[8] = {};
+  int prices = 0;
+  struct {
+    uint32_t start, end;
+    float price;
+  } grid[400]; // grid price forecast, 15 min slots
+};
+
+// loadpoint fields the dial uses; the socket sends each as "loadpoints.<n>.<field>"
+const char *const FIELDS[] = {
+    "title", "mode", "alwaysCharge", "chargePower", "connected", "vehicleSoc", "vehicleTitle",
+    "vehicleName", "effectiveLimitSoc", "chargeRemainingDuration", "effectivePlanTime",
+    "effectivePlanSoc", "planEnergy", "planProjectedStart", "planProjectedEnd",
+    "chargerFeatureHeating", "chargerFeatureIntegratedDevice", "chargerFeatureContinuous",
+    "chargerFeatureSwitchDevice"};
+
+// evcc sends a lot more than the dial needs: only these keys are kept while parsing
+JsonDocument makeFilter(int lp) {
+  JsonDocument f;
+  char key[48];
+  for (const char *k : {"pvPower", "homePower", "tariffGrid", "forecast.grid"}) f[k] = true;
+  f["grid"]["power"] = true;
+  f["battery"]["power"] = true;
+  f["battery"]["soc"] = true;
+  for (const char *k : {"title", "capacity", "features"}) f["vehicles"]["*"][k] = true;
+  for (int n = 0; n < 8; n++) {
+    snprintf(key, sizeof(key), "loadpoints.%d.title", n);
+    f[key] = true;
+  }
+  for (const char *k : FIELDS) {
+    snprintf(key, sizeof(key), "loadpoints.%d.%s", lp - 1, k);
+    f[key] = true;
+  }
+  return f;
+}
+
+// merge one socket message; a message holds only the keys that changed
+void apply(JsonObjectConst msg, State &s, Raw &r) {
+  JsonVariantConst v;
+  char key[48];
+  auto has = [&](const char *k) {
+    v = msg[k];
+    return !v.isUnbound();
+  };
+  auto lp = [&](const char *field) {
+    snprintf(key, sizeof(key), "loadpoints.%d.%s", s.loadpoint - 1, field);
+    return has(key);
+  };
+
+  if (lp("title")) s.lp = v | "";
+  if (lp("mode")) r.mode = v | "off";
+  if (lp("alwaysCharge")) r.always = v | "off";
+  if (lp("chargePower")) s.chargePower = v | 0.0f;
+  if (lp("connected")) s.connected = v | false;
+  if (lp("vehicleSoc")) s.soc = lroundf(v | 0.0f);
+  if (lp("vehicleTitle")) s.veh = v | "";
+  if (lp("vehicleName")) r.vehicle = v | "";
+  if (lp("effectiveLimitSoc")) s.limit = lroundf(v | 0.0f);
+  if (lp("chargeRemainingDuration")) r.remaining = v | 0.0f;
+  if (lp("effectivePlanTime")) r.planAt = iso(v | "");
+  if (lp("effectivePlanSoc")) s.planSoc = lroundf(v | 0.0f);
+  if (lp("planEnergy")) s.planEnergy = v | 0.0f;
+  if (lp("planProjectedStart")) r.planFrom = iso(v | "");
+  if (lp("planProjectedEnd")) r.planTo = iso(v | "");
+  if (lp("chargerFeatureHeating")) s.heating = v | false;
+  if (lp("chargerFeatureIntegratedDevice")) s.integrated = v | false;
+  if (lp("chargerFeatureContinuous")) s.continuous = v | false;
+  if (lp("chargerFeatureSwitchDevice")) s.switchDevice = v | false;
+
+  for (int n = 0; n < 8; n++) {
+    snprintf(key, sizeof(key), "loadpoints.%d.title", n);
+    if (!has(key)) continue;
+    s.lps[n] = v | "";
+    s.lpCount = max(s.lpCount, n + 1);
+  }
+
+  if (has("pvPower")) s.pv = v | 0.0f;
+  if (has("homePower")) s.home = v | 0.0f;
+  if (has("tariffGrid")) s.price = v | 0.0f;
+  if (has("grid")) s.grid = v["power"] | 0.0f;
+  if (has("battery")) {
+    s.bat = v["power"] | 0.0f;
+    s.batSoc = lroundf(v["soc"] | -1.0f); // -1: no home battery
+  }
+  if (has("vehicles")) {
+    s.vehCount = 0;
+    for (JsonPairConst p : v.as<JsonObjectConst>()) {
+      if (s.vehCount == 8) break;
+      r.vehCap[s.vehCount] = p.value()["capacity"] | 0.0f;
+      r.vehOffline[s.vehCount] = false;
+      for (JsonVariantConst f : p.value()["features"].as<JsonArrayConst>())
+        if (!strcmp(f | "", "Offline")) r.vehOffline[s.vehCount] = true;
+      s.vehNames[s.vehCount] = p.key().c_str();
+      s.vehTitles[s.vehCount++] = p.value()["title"] | "";
     }
   }
-  return out;
+  if (has("forecast.grid")) {
+    r.prices = 0;
+    for (JsonArrayConst slot : v.as<JsonArrayConst>()) {
+      if (r.prices == 400) break;
+      r.grid[r.prices++] = {slot[0] | (uint32_t)0, slot[1] | (uint32_t)0, slot[2] | 0.0f};
+    }
+  }
 }
 
-State poll() {
-  static const String base = String(EVCC_URL) + "/api/state?jq=",
-                      query = urlencode(String(" as $i|") + QUERY);
-  State next;
-  next.loadpoint = loadpoint;
-  if (!WiFi.isConnected()) return next;
-  HTTPClient http;
-  http.setTimeout(3000);
-  http.begin(base + (next.loadpoint - 1) + query);
-  JsonDocument doc;
-  bool ok = http.GET() == HTTP_CODE_OK && !deserializeJson(doc, http.getString());
-  http.end();
-  next.ok = ok;
-  if (!ok) return next;
+// everything that depends on the clock or on more than one message
+void derive(State &s, const Raw &r) {
+  time_t now = time(nullptr);
+  struct tm tm;
+  localtime_r(&now, &tm);
+  s.minute = tm.tm_hour * 60 + tm.tm_min;
 
-  next.lp = doc["lp"] | "";
-  next.veh = doc["veh"] | "";
-  next.fin = doc["fin"] | "";
-  next.planTime = doc["pt"] | "";
-  next.planStart = doc["ps"] | "";
-  next.planEnd = doc["pe"] | "";
-  next.connected = doc["con"] | false;
-  next.heating = doc["heat"] | false;
-  next.integrated = doc["dev"] | false;
-  next.continuous = doc["cont"] | false;
-  next.switchDevice = doc["sw"] | false;
-  // evcc sends these as floats: read as float, or a fraction would fall back to the default
-  next.soc = lroundf(doc["soc"] | 0.0f);
-  next.limit = lroundf(doc["lim"] | 0.0f);
-  next.planSoc = lroundf(doc["psoc"] | 0.0f);
-  next.socPlan = doc["sbp"] | false;
-  next.planEnergy = doc["pen"] | 0.0f;
-  next.capacity = doc["cap"] | 0.0f;
-  next.batSoc = lroundf(doc["bsoc"] | -1.0f); // -1: no home battery
-  next.minute = doc["min"] | 0;
-  next.chargePower = doc["cp"] | 0.0f;
-  next.pv = doc["pv"] | 0.0f;
-  next.grid = doc["grid"] | 0.0f;
-  next.home = doc["home"] | 0.0f;
-  next.bat = doc["bat"] | 0.0f;
-  next.price = doc["price"] | 0.0f;
-
-  const char *mode = doc["mode"] | "off";
-  const char *always = doc["ac"] | "off";
+  s.mode = 0;
   for (int i = 0; i < MODE_COUNT; i++)
-    if (!strcmp(mode, MODES[i].mode) && (!MODES[i].always || !strcmp(always, MODES[i].always)))
-      next.mode = i;
+    if (r.mode == MODES[i].mode && (!MODES[i].always || r.always == MODES[i].always)) s.mode = i;
 
-  next.slots = 0;
-  for (JsonArray s : doc["fc"].as<JsonArray>()) {
-    if (next.slots == 24) break;
-    next.fc[next.slots++] = {s[0].as<uint8_t>(), s[1].as<float>(), s[2].as<int>() == 1};
+  s.fin = r.remaining > 0 ? hm(now + (time_t)r.remaining) : String("");
+  s.planTime = hm(r.planAt);
+  s.planStart = hm(r.planFrom);
+  s.planEnd = hm(r.planTo);
+
+  // as evcc: a plan targets a soc if the vehicle reports one and its capacity is known
+  bool known = false, offline = false;
+  s.capacity = 0;
+  for (int i = 0; i < s.vehCount; i++) {
+    if (r.vehicle.length() == 0 || !(s.vehNames[i] == r.vehicle)) continue;
+    known = true;
+    offline = r.vehOffline[i];
+    s.capacity = r.vehCap[i];
   }
-  for (JsonVariant title : doc["lps"].as<JsonArray>()) {
-    if (next.lpCount == 8) break;
-    next.lps[next.lpCount++] = title | "";
+  s.socPlan = ((known && !offline) || s.soc > 0) && s.capacity > 0;
+
+  // price forecast as up to 24 hourly averages from now on, for the clock ring
+  s.slots = 0;
+  uint32_t hour = 0;
+  float sum = 0;
+  int count = 0;
+  for (int i = 0; i <= r.prices && clockSet(); i++) {
+    bool end = i == r.prices;
+    if (!end && r.grid[i].end <= (uint32_t)now) continue;
+    uint32_t h = end ? 0 : r.grid[i].start / 3600 * 3600;
+    if (count && (end || h != hour)) {
+      if (s.slots == 24) break;
+      time_t t = hour;
+      localtime_r(&t, &tm);
+      bool planned = r.planFrom && r.planTo && t + 3600 > r.planFrom && t < r.planTo;
+      s.fc[s.slots++] = {(uint8_t)tm.tm_hour, sum / count, planned};
+      sum = count = 0;
+    }
+    if (end) break;
+    hour = h;
+    sum += r.grid[i].price;
+    count++;
   }
-  for (JsonArray v : doc["vt"].as<JsonArray>()) {
-    if (next.vehCount == 8) break;
-    next.vehNames[next.vehCount] = v[0] | "";
-    next.vehTitles[next.vehCount++] = v[1] | "";
-  }
-  return next;
 }
 
-// queue a POST for the current loadpoint; an empty path only triggers a poll
+// payload of websocket messages, as an ArduinoJson reader. Servers send unmasked frames.
+struct WsReader {
+  Client &c;
+  uint64_t left = 0; // payload bytes left in the current frame
+  bool last = true;  // current frame is the last one of its message
+  bool failed = false;
+  uint8_t buf[1024];
+  int pos = 0, len = 0;
+
+  // nothing buffered and nothing on the socket
+  bool idle() { return pos == len && c.available() <= 0; }
+
+  // next byte from the socket, -1 once it is closed or stalls for 5 s
+  int next() {
+    uint32_t start = millis();
+    while (pos == len) {
+      int n = c.available() > 0 ? c.read(buf, sizeof(buf)) : 0;
+      if (n > 0) {
+        pos = 0;
+        len = n;
+      } else if (!c.connected() || millis() - start > 5000) {
+        failed = true;
+        return -1;
+      } else {
+        delay(5);
+      }
+    }
+    return buf[pos++];
+  }
+
+  // upgrade request; true if the server switched to the websocket protocol
+  bool handshake(const char *host) {
+    c.print(String("GET /ws HTTP/1.1\r\nHost: ") + host +
+            "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: c21hcnQta25vYi1ldmNjIQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+    char status[13] = "";
+    int n = 0, newlines = 0;
+    while (newlines < 2) { // headers end with an empty line
+      int b = next();
+      if (b < 0) return false;
+      if (n < 12) status[n++] = b;
+      if (b == '\n') newlines++;
+      else if (b != '\r') newlines = 0;
+    }
+    return !strcmp(status, "HTTP/1.1 101");
+  }
+
+  // frame header; false on a close frame or a broken connection
+  bool header() {
+    for (;;) {
+      int h = next(), l = next();
+      if (h < 0 || l < 0) return false;
+      left = l & 0x7F;
+      int more = left == 126 ? 2 : left == 127 ? 8 : 0;
+      if (more) left = 0;
+      while (more--) left = left << 8 | (uint8_t)next();
+      int op = h & 0x0F;
+      if (failed || op == 8) return false;
+      if (op < 8) {
+        last = h & 0x80;
+        return true;
+      }
+      skip(); // ping or pong
+    }
+  }
+
+  void skip() {
+    while (left && next() >= 0) left--;
+    left = 0;
+  }
+
+  // drop what the JSON parser left of the message
+  void finish() {
+    skip();
+    while (!last && header()) skip();
+  }
+
+  int read() {
+    while (!left)
+      if (last || !header()) return -1;
+    left--;
+    return next();
+  }
+
+  size_t readBytes(char *out, size_t n) {
+    size_t i = 0;
+    for (int b; i < n && (b = read()) >= 0; i++) out[i] = b;
+    return i;
+  }
+};
+
+void handover(const State &s) {
+  xSemaphoreTake(lock, portMAX_DELAY);
+  pending = s;
+  fresh = true;
+  xSemaphoreGive(lock);
+}
+
+// evcc pushes its state on /ws: everything once on connect, then each value as it changes
+void socketTask(void *) {
+  char scheme[8] = "", host[64] = "";
+  int port = 0;
+  if (sscanf(EVCC_URL, "%7[a-z]://%63[^:/]:%d", scheme, host, &port) < 3)
+    port = strcmp(scheme, "https") ? 80 : 443;
+  WiFiClient plain;
+  WiFiClientSecure secure;
+  secure.setInsecure(); // shortcut: no certificate check, add a CA if evcc is not on the LAN
+  Client &c = strcmp(scheme, "https") ? (Client &)plain : (Client &)secure;
+  static Raw raw;
+  static WsReader ws{c};
+
+  for (;;) {
+    State cur;
+    cur.loadpoint = loadpoint;
+    raw = Raw();
+    ws.pos = ws.len = ws.left = 0;
+    ws.last = true;
+    ws.failed = false;
+    if (WiFi.isConnected() && c.connect(host, port) && ws.handshake(host)) {
+      JsonDocument filter = makeFilter(cur.loadpoint);
+      bool changed = false;
+      uint32_t seen = millis(), shown = 0;
+      // a changed loadpoint needs the full state again, so it reconnects
+      while (!ws.failed && cur.loadpoint == loadpoint && millis() - seen < 120000) {
+        // show a burst of messages at once; refresh every 20 s for the clock
+        if (cur.ok && (changed ? ws.idle() || millis() - shown > 500 : millis() - shown > 20000)) {
+          derive(cur, raw);
+          handover(cur);
+          changed = false;
+          shown = millis();
+        }
+        if (ws.idle()) {
+          delay(20);
+          continue;
+        }
+        if (!ws.header()) break;
+        JsonDocument doc;
+        if (!deserializeJson(doc, ws, DeserializationOption::Filter(filter)) &&
+            doc.as<JsonObjectConst>().size()) {
+          apply(doc.as<JsonObjectConst>(), cur, raw);
+          cur.ok = changed = true;
+        }
+        ws.finish();
+        seen = millis();
+      }
+    }
+    c.stop();
+    if (cur.loadpoint != loadpoint) continue;
+    // connection lost: say so, then retry
+    State offline;
+    offline.loadpoint = cur.loadpoint;
+    handover(offline);
+    delay(3000);
+  }
+}
+
+// queue a POST for the current loadpoint
 void post(const String &path) {
-  char buf[48] = "";
-  if (path.length())
-    strlcpy(buf, (String("/api/loadpoints/") + loadpoint + path).c_str(), sizeof(buf));
+  char buf[48];
+  strlcpy(buf, (String("/api/loadpoints/") + loadpoint + path).c_str(), sizeof(buf));
   xQueueSend(posts, buf, 0);
 }
 
-// all HTTP runs here, so the UI loop never waits for the network
-void netTask(void *) {
+// POSTs run here, so the UI loop never waits for the network
+void postTask(void *) {
   char path[48];
   for (;;) {
-    // a queued POST wakes the task early and is followed by a fresh poll
-    if (xQueueReceive(posts, path, pdMS_TO_TICKS(3000)) && path[0]) {
-      HTTPClient http;
-      http.setTimeout(3000);
-      http.begin(String(EVCC_URL) + path);
-      if (http.POST("") != HTTP_CODE_OK) postFailed = true;
-      http.end();
-    }
-    State next = poll();
-    xSemaphoreTake(lock, portMAX_DELAY);
-    pending = next;
-    fresh = true;
-    xSemaphoreGive(lock);
+    if (!xQueueReceive(posts, path, pdMS_TO_TICKS(1000))) continue;
+    HTTPClient http;
+    http.setTimeout(3000);
+    http.begin(String(EVCC_URL) + path);
+    if (http.POST("") != HTTP_CODE_OK) postFailed = true;
+    http.end();
   }
 }
 
@@ -564,8 +829,7 @@ void onPress() {
       }
       loadpoint = edit + 1;
       prefs.putInt("lp", loadpoint);
-      post(""); // poll the new loadpoint right away
-      switching = true; // the picker stays until that poll is in, not the old loadpoint
+      switching = true; // the picker stays until its data is in, not the old loadpoint
       break;
     case HOME:
       view = LIMIT;
@@ -620,7 +884,11 @@ void setup() {
   loadpoint = prefs.getInt("lp", LOADPOINT);
   lock = xSemaphoreCreateMutex();
   posts = xQueueCreate(4, 48);
-  xTaskCreate(netTask, "net", 8192, nullptr, 1, nullptr);
+#ifdef ARDUINO
+  configTzTime(TZ, "pool.ntp.org"); // plan and finish times are shown in local time
+#endif
+  xTaskCreate(socketTask, "socket", 12288, nullptr, 1, nullptr);
+  xTaskCreate(postTask, "post", 8192, nullptr, 1, nullptr);
   lastEnc = M5Dial.Encoder.read();
 #ifndef ARDUINO
   if (const char *p = getenv("SIM_PAGE")) view = page = (View)atoi(p); // screenshots of other pages
@@ -672,7 +940,6 @@ void loop() {
     // the saved loadpoint no longer exists in evcc
     if (st.ok && st.lpCount && loadpoint > st.lpCount) {
       loadpoint = 1;
-      post("");
     }
   }
   if (postFailed) {

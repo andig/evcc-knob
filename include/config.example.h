@@ -7,6 +7,8 @@
 #define EVCC_URL "http://evcc.local:7070" // no trailing slash
 #define LOADPOINT 1                       // 1-based, as in the evcc API
 
+#define TZ "CET-1CEST,M3.5.0,M10.5.0/3" // POSIX time zone, for plan and finish times
+
 #define ENC_STEP 4 // encoder counts per detent
 
 // RFID tag UID (lowercase hex) -> evcc vehicle name (not title).

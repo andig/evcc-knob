@@ -1,4 +1,4 @@
-# smart-knob
+# evcc-knob
 
 An [evcc](https://evcc.io) remote for the [M5Stack Dial](https://shop.m5stack.com/products/m5stack-dial-v1-1).
 One dial controls one loadpoint: it shows the charging state and sets mode, limit and vehicle.
@@ -68,6 +68,7 @@ All settings are in `include/config.h`, which is not committed.
 | `WIFI_SSID`, `WIFI_PASS` | WiFi credentials |
 | `EVCC_URL` | evcc base URL, for example `http://evcc.local:7070`, no trailing slash |
 | `LOADPOINT` | Loadpoint shown on first boot, 1-based as in the evcc API |
+| `TZ` | POSIX time zone string. Optional, default is Central Europe (`CET-1CEST,M3.5.0,M10.5.0/3`). |
 | `ENC_STEP` | Encoder counts per detent. Change it if one click moves no step or several. |
 | `TAGS` | RFID tag UID (lowercase hex) to evcc vehicle name |
 
@@ -76,13 +77,17 @@ The vehicle name is the evcc name (such as `vehicle_1`), not the title.
 
 ## How it works
 
-- A background task polls `GET /api/state?jq=…` every 3 s. The jq program in
-  `include/query.h` runs inside evcc and returns about 1 kB instead of the full state.
-  It also does all time handling, so the dial needs no NTP and no timezone.
+- A background task listens on evcc's websocket (`/ws`). evcc sends its whole state once
+  on connect and then every value as it changes, so the dial updates within a second
+  and never polls.
+- The messages are parsed as a stream with a key filter: only the values the dial shows
+  are kept in memory. Changing the loadpoint reconnects to get that loadpoint's state.
+- Plan and finish times are shown in local time, so the dial gets the time by NTP
+  (`pool.ntp.org`) and needs the time zone in `TZ`.
 - Changes go through `POST /api/loadpoints/<n>/mode/<mode>`, `/limitsoc/<soc>` and
   `/vehicle/<name>`.
 - The UI loop never waits for the network. A changed mode or limit is shown at once
-  and confirmed by the next poll.
+  and confirmed by the next message from evcc.
 
 ## Fonts
 
@@ -93,6 +98,6 @@ To change sizes or characters, edit `tools/mkfonts.py` and run
 
 ## Limitations
 
-- Plain HTTP only.
+- `https` works, but the server certificate is not checked.
 - Prices are shown as ct/kWh, which assumes a currency with a 1/100 subunit.
 - No WiFi setup screen and no over-the-air update: settings need a rebuild.
