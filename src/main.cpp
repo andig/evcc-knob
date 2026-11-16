@@ -640,7 +640,9 @@ struct Ring {
   }
 };
 
-void arc(float from, float to, uint32_t color, bool round = false) {
+// erase: clear every pixel the segment touches to the background, so it can be redrawn in
+// another color without the old anti-aliased edge showing through
+void arc(float from, float to, uint32_t color, bool round = false, bool erase = false) {
   static Ring ring;
   const float CAP = 5;
   float span = to - from;
@@ -695,6 +697,10 @@ void arc(float from, float to, uint32_t color, bool round = false) {
             a = max(a, min(CAP + 0.5f - hypotf(dx - capX[c], dy - capY[c]), 1.0f));
         }
         if (a <= 0) continue;
+        if (erase) {
+          cv.writePixel(x, y, C_BG);
+          continue;
+        }
         if (a >= 1) {
           cv.writePixel(x, y, color);
           continue;
@@ -790,11 +796,16 @@ void listArrows(int count) {
   if (edit < count - 2) cv.fillTriangle(120, 194, 112, 184, 128, 184, C_DIM);
 }
 
+// picker ring segment i of count
+void segment(int i, int count, uint32_t color, bool erase = false) {
+  float step = 270.0f / count;
+  arc(135 + i * step + 5, 135 + (i + 1) * step - 5, color, true, erase);
+}
+
 void drawMode() {
   int list[MODE_COUNT], count = modeList(list);
-  float step = 270.0f / count;
   for (int i = 0; i < count; i++) {
-    arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
+    segment(i, count, i == edit ? C_GREEN : C_SEG);
     int y = 120 + (i - edit) * 38;
     if (!settled || y < 45 || y > 195) continue;
     cv.setClipRect(0, LIST_TOP, 240, LIST_HEIGHT); // keep entries off the arrows
@@ -806,9 +817,8 @@ void drawMode() {
 
 void drawLoadpoints() {
   if (settled && !switching) listArrows(st.lpCount);
-  float step = 270.0f / st.lpCount;
   for (int i = 0; i < st.lpCount; i++) {
-    arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
+    segment(i, st.lpCount, i == edit ? C_GREEN : C_SEG);
     int y = 120 + (i - edit) * 38;
     if (!settled || y < 45 || y > 195 || (switching && i != edit)) continue;
     // long titles do not fit the large font
@@ -1172,7 +1182,23 @@ void loop() {
     dirty = true;
   }
 
-  if (dirty || view != before || edit != editBefore) {
+  // while a picker turns, only the old and the new segment change: recolor just those two
+  static View drawnView = HOME;
+  static bool drawnSettled = true;
+  bool picker = view == MODE || view == LOADPOINTS;
+  if (!dirty && picker && view == before && view == drawnView && !settled && !drawnSettled &&
+      edit != editBefore) {
+    uint32_t t = millis();
+    int list[MODE_COUNT], count = view == MODE ? modeList(list) : st.lpCount;
+    segment(editBefore, count, 0, true);
+    segment(editBefore, count, C_SEG);
+    segment(edit, count, 0, true);
+    segment(edit, count, C_GREEN);
+    cv.pushSprite(0, 0);
+    LOG("%lu segments %lums\n", (unsigned long)t, (unsigned long)(millis() - t));
+  } else if (dirty || view != before || edit != editBefore) {
+    drawnView = view;
+    drawnSettled = settled;
     uint32_t t = millis();
     draw();
     LOG("%lu draw view=%d settled=%d %lums\n", (unsigned long)t, view, settled,
