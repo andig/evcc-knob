@@ -74,6 +74,13 @@ enum View { HOME, FLOW, PLAN, MODE, LIMIT, LOADPOINTS, TOAST };
 const int PAGES = 3; // HOME, FLOW, PLAN are swipeable pages, the rest overlays
 
 M5Canvas cv(&M5Dial.Display);
+
+// debug log on USB serial, read with: pio device monitor
+#ifdef ARDUINO
+#define LOG(...) Serial.printf(__VA_ARGS__)
+#else
+#define LOG(...) printf(__VA_ARGS__)
+#endif
 Preferences prefs;
 View view = HOME, page = HOME;
 int edit = 0;             // value being edited in MODE/LIMIT/LOADPOINTS
@@ -432,6 +439,8 @@ void socketTask(void *) {
         seen = millis();
       }
     }
+    LOG("%lu ws closed wifi=%d failed=%d ok=%d\n", (unsigned long)millis(), WiFi.isConnected(),
+        ws.failed, cur.ok);
     c.stop();
     if (cur.loadpoint != loadpoint) continue;
     // connection lost: say so, then retry
@@ -800,7 +809,10 @@ void showToast(const String &label, const String &title, const String &green,
 }
 
 void onRotate(int steps) {
-  if (!st.ok || switching) return;
+  if (!st.ok || switching) {
+    LOG("%lu rotate ignored ok=%d switching=%d\n", (unsigned long)millis(), st.ok, switching);
+    return;
+  }
   int list[MODE_COUNT], count = modeList(list);
   if (view == HOME) {
     view = MODE;
@@ -900,6 +912,9 @@ long encRead() { return M5Dial.Encoder.read(); }
 void setup() {
   auto cfg = M5.config();
 #ifdef ARDUINO
+  cfg.serial_baudrate = 115200; // M5Unified skips Serial.begin by default, the debug log needs it
+#endif
+#ifdef ARDUINO
   // the M5Dial encoder library counts in interrupts and misses edges when the contacts
   // bounce; the PCNT hardware counter with its glitch filter does not
   M5Dial.begin(cfg, false, true); // RFID
@@ -908,6 +923,7 @@ void setup() {
 #else
   M5Dial.begin(cfg, true, true); // encoder, RFID
 #endif
+  LOG("evcc-knob boot\n");
   cv.createSprite(240, 240);
   loadFonts();
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -939,6 +955,13 @@ void loop() {
   if (steps) {
     lastEnc += steps * ENC_STEP;
     onRotate(steps);
+  }
+  static long encLogged = 0;
+  if (enc != encLogged) {
+    // rest is the count offset from the detent: not 0 at rest means a lost count
+    LOG("%lu enc=%ld moved=%d steps=%d rest=%ld view=%d edit=%d\n", (unsigned long)millis(), enc,
+        moved, steps, enc - lastEnc, view, edit);
+    encLogged = enc;
   }
 
   if (M5Dial.BtnA.wasClicked()) onPress();
@@ -989,7 +1012,10 @@ void loop() {
   }
 
   if (dirty || view != before || edit != editBefore) {
+    uint32_t t = millis();
     draw();
+    LOG("%lu draw view=%d settled=%d %lums\n", (unsigned long)t, view, settled,
+        (unsigned long)(millis() - t));
     dirty = false;
   }
 }
