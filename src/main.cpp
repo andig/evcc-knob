@@ -77,7 +77,9 @@ struct State {
 enum View { HOME, FLOW, PLAN, MODE, LIMIT, LOADPOINTS, TOAST };
 const int PAGES = 3; // HOME, FLOW, PLAN are swipeable pages, the rest overlays
 
-M5Canvas cv(&M5Dial.Display);
+// M5.Display, not M5Dial.Display: that is a reference set by M5Dial's constructor, which
+// may run after this one, leaving the sprite without a display
+M5Canvas cv(&M5.Display);
 
 // debug log on USB serial, read with: pio device monitor
 #ifdef ARDUINO
