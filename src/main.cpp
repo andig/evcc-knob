@@ -11,6 +11,10 @@
 #endif
 #include <ArduinoJson.h>
 #include "icons.h"
+#include "query.h"
+
+// shortcut: websocket off, evcc is polled every 3 s; set 1 to use the websocket again
+#define WEBSOCKET 0
 #include "fonts.h"
 
 #ifndef TZ
@@ -78,7 +82,9 @@ M5Canvas cv(&M5Dial.Display);
 // debug log on USB serial, read with: pio device monitor
 #ifdef ARDUINO
 #define LOG(...) Serial.printf(__VA_ARGS__)
+#define HEAP ESP.getFreeHeap()
 #else
+#define HEAP 0
 #define LOG(...) printf(__VA_ARGS__)
 #endif
 Preferences prefs;
@@ -451,6 +457,85 @@ void socketTask(void *) {
   }
 }
 
+String urlencode(const String &s) {
+  String out;
+  char buf[4];
+  for (char c : s) {
+    if (isalnum(c)) {
+      out += c;
+    } else {
+      snprintf(buf, sizeof(buf), "%%%02X", (uint8_t)c);
+      out += buf;
+    }
+  }
+  return out;
+}
+
+// whole state of the current loadpoint in one request, shrunk by evcc's jq
+State poll() {
+  static const String base = String(EVCC_URL) + "/api/state?jq=",
+                      query = urlencode(String(" as $i|") + QUERY);
+  State next;
+  next.loadpoint = loadpoint;
+  if (!WiFi.isConnected()) return next;
+  HTTPClient http;
+  http.setTimeout(3000);
+  http.begin(base + (next.loadpoint - 1) + query);
+  JsonDocument doc;
+  bool ok = http.GET() == HTTP_CODE_OK && !deserializeJson(doc, http.getString());
+  http.end();
+  next.ok = ok;
+  if (!ok) return next;
+
+  next.lp = doc["lp"] | "";
+  next.veh = doc["veh"] | "";
+  next.fin = doc["fin"] | "";
+  next.planTime = doc["pt"] | "";
+  next.planStart = doc["ps"] | "";
+  next.planEnd = doc["pe"] | "";
+  next.connected = doc["con"] | false;
+  next.heating = doc["heat"] | false;
+  next.integrated = doc["dev"] | false;
+  next.continuous = doc["cont"] | false;
+  next.switchDevice = doc["sw"] | false;
+  // evcc sends these as floats: read as float, or a fraction would fall back to the default
+  next.soc = lroundf(doc["soc"] | 0.0f);
+  next.limit = lroundf(doc["lim"] | 0.0f);
+  next.planSoc = lroundf(doc["psoc"] | 0.0f);
+  next.socPlan = doc["sbp"] | false;
+  next.planEnergy = doc["pen"] | 0.0f;
+  next.capacity = doc["cap"] | 0.0f;
+  next.batSoc = lroundf(doc["bsoc"] | -1.0f); // -1: no home battery
+  next.minute = doc["min"] | 0;
+  next.chargePower = doc["cp"] | 0.0f;
+  next.pv = doc["pv"] | 0.0f;
+  next.grid = doc["grid"] | 0.0f;
+  next.home = doc["home"] | 0.0f;
+  next.bat = doc["bat"] | 0.0f;
+  next.price = doc["price"] | 0.0f;
+
+  const char *mode = doc["mode"] | "off";
+  const char *always = doc["ac"] | "off";
+  for (int i = 0; i < MODE_COUNT; i++)
+    if (!strcmp(mode, MODES[i].mode) && (!MODES[i].always || !strcmp(always, MODES[i].always)))
+      next.mode = i;
+
+  for (JsonArray s : doc["fc"].as<JsonArray>()) {
+    if (next.slots == 24) break;
+    next.fc[next.slots++] = {s[0].as<uint8_t>(), s[1].as<float>(), s[2].as<int>() == 1};
+  }
+  for (JsonVariant title : doc["lps"].as<JsonArray>()) {
+    if (next.lpCount == 8) break;
+    next.lps[next.lpCount++] = title | "";
+  }
+  for (JsonArray v : doc["vt"].as<JsonArray>()) {
+    if (next.vehCount == 8) break;
+    next.vehNames[next.vehCount] = v[0] | "";
+    next.vehTitles[next.vehCount++] = v[1] | "";
+  }
+  return next;
+}
+
 // queue a POST for the current loadpoint
 void post(const String &path) {
   char buf[48];
@@ -458,16 +543,25 @@ void post(const String &path) {
   xQueueSend(posts, buf, 0);
 }
 
-// POSTs run here, so the UI loop never waits for the network
+// POSTs (and without websocket the polls) run here, so the UI loop never waits for the network
 void postTask(void *) {
   char path[48];
   for (;;) {
-    if (!xQueueReceive(posts, path, pdMS_TO_TICKS(1000))) continue;
-    HTTPClient http;
-    http.setTimeout(3000);
-    http.begin(String(EVCC_URL) + path);
-    if (http.POST("") != HTTP_CODE_OK) postFailed = true;
-    http.end();
+    // a queued POST wakes the task early and is followed by a fresh poll
+    if (xQueueReceive(posts, path, pdMS_TO_TICKS(WEBSOCKET ? 1000 : 3000))) {
+      HTTPClient http;
+      http.setTimeout(3000);
+      http.begin(String(EVCC_URL) + path);
+      if (http.POST("") != HTTP_CODE_OK) postFailed = true;
+      http.end();
+    }
+#if !WEBSOCKET
+    uint32_t t = millis();
+    State next = poll();
+    LOG("%lu poll ok=%d %lums heap=%lu\n", (unsigned long)t, next.ok, (unsigned long)(millis() - t),
+        (unsigned long)HEAP);
+    handover(next);
+#endif
   }
 }
 
@@ -934,7 +1028,9 @@ void setup() {
 #ifdef ARDUINO
   configTzTime(TZ, "pool.ntp.org"); // plan and finish times are shown in local time
 #endif
+#if WEBSOCKET
   xTaskCreate(socketTask, "socket", 12288, nullptr, 1, nullptr);
+#endif
   xTaskCreate(postTask, "post", 8192, nullptr, 1, nullptr);
   lastEnc = encRead();
 #ifndef ARDUINO

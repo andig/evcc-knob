@@ -77,17 +77,17 @@ The vehicle name is the evcc name (such as `vehicle_1`), not the title.
 
 ## How it works
 
-- A background task listens on evcc's websocket (`/ws`). evcc sends its whole state once
-  on connect and then every value as it changes, so the dial updates within a second
-  and never polls.
-- The messages are parsed as a stream with a key filter: only the values the dial shows
-  are kept in memory. Changing the loadpoint reconnects to get that loadpoint's state.
+- A background task polls `GET /api/state?jq=…` every 3 s. The jq program in
+  `include/query.h` runs inside evcc and returns about 1 kB instead of the full state.
+- Alternatively, with `WEBSOCKET 1` in `src/main.cpp`, it listens on evcc's websocket
+  (`/ws`): evcc sends its whole state once on connect and then every value as it changes.
+  The messages are parsed as a stream with a key filter. This is off for now.
 - Plan and finish times are shown in local time, so the dial gets the time by NTP
   (`pool.ntp.org`) and needs the time zone in `TZ`.
 - Changes go through `POST /api/loadpoints/<n>/mode/<mode>`, `/limitsoc/<soc>` and
   `/vehicle/<name>`.
 - The UI loop never waits for the network. A changed mode or limit is shown at once
-  and confirmed by the next message from evcc.
+  and confirmed by the next update from evcc.
 
 ## Fonts
 
