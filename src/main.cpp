@@ -83,8 +83,10 @@ M5Canvas cv(&M5Dial.Display);
 #ifdef ARDUINO
 #define LOG(...) Serial.printf(__VA_ARGS__)
 #define HEAP ESP.getFreeHeap()
+#define RSSI WiFi.RSSI()
 #else
 #define HEAP 0
+#define RSSI 0
 #define LOG(...) printf(__VA_ARGS__)
 #endif
 Preferences prefs;
@@ -482,7 +484,9 @@ State poll() {
   http.setTimeout(3000);
   http.begin(base + (next.loadpoint - 1) + query);
   JsonDocument doc;
-  bool ok = http.GET() == HTTP_CODE_OK && !deserializeJson(doc, http.getString());
+  int code = http.GET();
+  bool ok = code == HTTP_CODE_OK && !deserializeJson(doc, http.getString());
+  LOG("%lu http %d rssi=%d\n", (unsigned long)millis(), code, (int)RSSI);
   http.end();
   next.ok = ok;
   if (!ok) return next;
@@ -548,7 +552,7 @@ void postTask(void *) {
   char path[48];
   for (;;) {
     // a queued POST wakes the task early and is followed by a fresh poll
-    if (xQueueReceive(posts, path, pdMS_TO_TICKS(WEBSOCKET ? 1000 : 3000))) {
+    if (xQueueReceive(posts, path, pdMS_TO_TICKS(WEBSOCKET ? 1000 : 3000)) && path[0]) {
       HTTPClient http;
       http.setTimeout(3000);
       http.begin(String(EVCC_URL) + path);
@@ -625,10 +629,21 @@ void arc(float from, float to, uint32_t color, bool round = false) {
   int xa = max(0, (int)bx0 - PAD), xb = min(239, (int)bx1 + PAD);
   int ya = max(0, (int)by0 - PAD), yb = min(239, (int)by1 + PAD);
 
+  const float RI = R0 - 1, RO = R1 + 1;
+  cv.startWrite();
   for (int y = ya; y <= yb; y++) {
-    for (int x = xa; x <= xb; x++) {
-      float dx = x - 120, dy = y - 120, d2 = dx * dx + dy * dy;
-      if (d2 < (R0 - 1) * (R0 - 1) || d2 > (R1 + 1) * (R1 + 1)) continue;
+    float dy = y - 120;
+    if (fabsf(dy) > RO) continue;
+    // only the ring's own pixels on this row: skip outside it and its hollow centre
+    int xo = sqrtf(RO * RO - dy * dy) + 1;
+    int xi = fabsf(dy) < RI ? (int)sqrtf(RI * RI - dy * dy) : 0;
+    for (int x = max(120 - xo, xa); x <= min(120 + xo, xb); x++) {
+      if (x > 120 - xi && x < 120 + xi) {
+        x = 120 + xi - 1;
+        continue;
+      }
+      float dx = x - 120, d2 = dx * dx + dy * dy;
+      if (d2 < RI * RI || d2 > RO * RO) continue;
       // coverage: distance in pixels to the nearest edge, 0.5 on the edge itself
       float d = sqrtf(d2), a = min(d - R0, R1 - d) + 0.5f;
       if (span < 360) {
@@ -641,14 +656,15 @@ void arc(float from, float to, uint32_t color, bool round = false) {
       }
       if (a <= 0) continue;
       if (a >= 1) {
-        cv.drawPixel(x, y, color);
+        cv.writePixel(x, y, color);
         continue;
       }
       auto bg = cv.readPixelRGB(x, y);
-      cv.drawPixel(x, y, lgfx::color888(bg.r + (r - bg.r) * a, bg.g + (g - bg.g) * a,
-                                        bg.b + (b - bg.b) * a));
+      cv.writePixel(x, y, lgfx::color888(bg.r + (r - bg.r) * a, bg.g + (g - bg.g) * a,
+                                         bg.b + (b - bg.b) * a));
     }
   }
+  cv.endWrite();
 }
 
 void dot(float angle, int radius, int size, uint32_t color) {
@@ -748,12 +764,12 @@ void drawMode() {
 }
 
 void drawLoadpoints() {
-  if (settled) listArrows(st.lpCount);
+  if (settled && !switching) listArrows(st.lpCount);
   float step = 270.0f / st.lpCount;
   for (int i = 0; i < st.lpCount; i++) {
     arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
     int y = 120 + (i - edit) * 38;
-    if (!settled || y < 45 || y > 195) continue;
+    if (!settled || y < 45 || y > 195 || (switching && i != edit)) continue;
     // long titles do not fit the large font
     cv.setFont(F_LARGE);
     bool large = i == edit && cv.textWidth(st.lps[i].c_str()) < 190;
@@ -951,7 +967,12 @@ void onPress() {
       }
       loadpoint = edit + 1;
       prefs.putInt("lp", loadpoint);
-      switching = true; // the picker stays until its data is in, not the old loadpoint
+      switching = true; // the picker shows only the new loadpoint until its data is in
+      dirty = true;     // neither view nor edit change, so redraw explicitly
+      {
+        char wake[48] = ""; // empty entry: no POST, only an early poll
+        xQueueSend(posts, wake, 0);
+      }
       break;
     case HOME:
       view = LIMIT;
@@ -1012,6 +1033,8 @@ void setup() {
   // the M5Dial encoder library counts in interrupts and misses edges when the contacts
   // bounce; the PCNT hardware counter with its glitch filter does not
   M5Dial.begin(cfg, false, true); // RFID
+  Serial.setTxTimeoutMs(0); // never wait for a host that does not read the log
+  ESP32Encoder::useInternalWeakPullResistors = puType::up; // contacts switch to GND
   enc.attachFullQuad(DIAL_ENCODER_PIN_A, DIAL_ENCODER_PIN_B);
   enc.setFilter(1023);
 #else
@@ -1101,7 +1124,8 @@ void loop() {
     showToast("", "Failed", "Not set");
   }
 
-  bool rest = (view != MODE && view != LOADPOINTS) || millis() - overlayAt > 150;
+  // switching keeps overlayAt fresh to hold the picker open, but the dial rests
+  bool rest = switching || (view != MODE && view != LOADPOINTS) || millis() - overlayAt > 150;
   if (rest != settled) {
     settled = rest;
     dirty = true;
