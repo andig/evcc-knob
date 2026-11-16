@@ -76,7 +76,6 @@ M5Canvas cv(&M5Dial.Display);
 Preferences prefs;
 View view = HOME, page = HOME;
 int edit = 0;             // value being edited in MODE/LIMIT/LOADPOINTS
-float scrollPos = 0;      // picker list position, eases towards edit
 uint32_t overlayAt = 0;   // last interaction with an overlay
 volatile int loadpoint = LOADPOINT; // 1-based, LOADPOINT is only the first-boot default
 
@@ -89,6 +88,7 @@ long lastEnc = 0;
 String toast[4];
 bool toastCard = false;
 bool dirty = true;
+bool settled = true; // picker labels are drawn only once the dial rests, the arc at once
 bool switching = false; // loadpoint picked, its first data not here yet
 
 // ---------- evcc API ----------
@@ -505,8 +505,24 @@ void arc(float from, float to, uint32_t color, bool round = false) {
   }
   int r = color >> 16 & 0xFF, g = color >> 8 & 0xFF, b = color & 0xFF;
 
-  for (int y = 0; y < 240; y++) {
-    for (int x = 0; x < 240; x++) {
+  // scan only the segment's bounding box: its ends and the axis crossings between them
+  float bx0 = 240, bx1 = 0, by0 = 240, by1 = 0;
+  auto reach = [&](float deg) {
+    float c = cosf(deg * DEG_TO_RAD), s = sinf(deg * DEG_TO_RAD);
+    bx0 = min(bx0, 120 + min(c * R0, c * R1));
+    bx1 = max(bx1, 120 + max(c * R0, c * R1));
+    by0 = min(by0, 120 + min(s * R0, s * R1));
+    by1 = max(by1, 120 + max(s * R0, s * R1));
+  };
+  reach(from);
+  reach(to);
+  for (float q = ceilf(from / 90) * 90; q < to; q += 90) reach(q);
+  const int PAD = CAP + 2; // round ends and the anti-aliased edge reach past the segment
+  int xa = max(0, (int)bx0 - PAD), xb = min(239, (int)bx1 + PAD);
+  int ya = max(0, (int)by0 - PAD), yb = min(239, (int)by1 + PAD);
+
+  for (int y = ya; y <= yb; y++) {
+    for (int x = xa; x <= xb; x++) {
       float dx = x - 120, dy = y - 120, d2 = dx * dx + dy * dy;
       if (d2 < (R0 - 1) * (R0 - 1) || d2 > (R1 + 1) * (R1 + 1)) continue;
       // coverage: distance in pixels to the nearest edge, 0.5 on the edge itself
@@ -618,22 +634,22 @@ void drawMode() {
   float step = 270.0f / count;
   for (int i = 0; i < count; i++) {
     arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
-    int y = 120 + (i - scrollPos) * 38;
-    if (y < 45 || y > 195) continue;
-    cv.setClipRect(0, LIST_TOP, 240, LIST_HEIGHT); // keep sliding entries off the arrows
+    int y = 120 + (i - edit) * 38;
+    if (!settled || y < 45 || y > 195) continue;
+    cv.setClipRect(0, LIST_TOP, 240, LIST_HEIGHT); // keep entries off the arrows
     modeLabel(list[i], y, i == edit, i == edit ? C_GREEN : C_GREY);
     cv.clearClipRect();
   }
-  listArrows(count);
+  if (settled) listArrows(count);
 }
 
 void drawLoadpoints() {
-  listArrows(st.lpCount);
+  if (settled) listArrows(st.lpCount);
   float step = 270.0f / st.lpCount;
   for (int i = 0; i < st.lpCount; i++) {
     arc(135 + i * step + 5, 135 + (i + 1) * step - 5, i == edit ? C_GREEN : C_SEG, true);
-    int y = 120 + (i - scrollPos) * 38;
-    if (y < 45 || y > 195) continue;
+    int y = 120 + (i - edit) * 38;
+    if (!settled || y < 45 || y > 195) continue;
     // long titles do not fit the large font
     cv.setFont(F_LARGE);
     bool large = i == edit && cv.textWidth(st.lps[i].c_str()) < 190;
@@ -790,7 +806,6 @@ void onRotate(int steps) {
     edit = 0;
     for (int i = 0; i < count; i++)
       if (list[i] == st.mode) edit = i;
-    scrollPos = edit;
   }
   if (view == MODE)
     edit = constrain(edit + steps, 0, count - 1);
@@ -846,7 +861,7 @@ void onPress() {
 void onHold() {
   if (!st.ok || view != HOME) return;
   view = LOADPOINTS;
-  scrollPos = edit = loadpoint - 1;
+  edit = loadpoint - 1;
   overlayAt = millis();
   M5Dial.Speaker.tone(4000, 40);
 }
@@ -947,13 +962,9 @@ void loop() {
     showToast("", "Failed", "Not set");
   }
 
-  // picker lists slide to the selected entry instead of jumping
-  static uint32_t lastFrame = 0;
-  uint32_t dt = min((uint32_t)(millis() - lastFrame), (uint32_t)100);
-  lastFrame = millis();
-  if ((view == MODE || view == LOADPOINTS) && scrollPos != edit) {
-    float rest = edit - scrollPos;
-    scrollPos = fabsf(rest) < 0.02f ? edit : scrollPos + rest * (1 - expf(-(float)dt / 60));
+  bool rest = (view != MODE && view != LOADPOINTS) || millis() - overlayAt > 150;
+  if (rest != settled) {
+    settled = rest;
     dirty = true;
   }
 
