@@ -154,7 +154,7 @@ SCREENS = [
 
 out = [
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 800" width="1080" height="800">',
-    "<title>smart-knob screens: home, mode, limit, energy flow, plan, RFID</title>",
+    "<title>evcc-knob screens: home, mode, limit, energy flow, plan, RFID</title>",
 ]
 for i, (draw, caption) in enumerate(SCREENS):
     x, y = i % 3 * 360, i // 3 * 400
